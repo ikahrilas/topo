@@ -7,6 +7,7 @@ guard, the row-count guard and API keys from git-ignored environment variables.
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import functools
 import hashlib
 import json
@@ -14,6 +15,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import polars as pl
+import pytest
 from support.usaspending import action, write_actions
 
 from topo.sources import usaspending
@@ -113,6 +116,15 @@ def committed_project(project):
     return git(project, "rev-parse", "HEAD")
 
 
+def grant_rows(fain: str, start_fy: int, years: int) -> list[dict]:
+    """One action per year: A1 in May of start_fy, B1s after; Sept-Aug Budget periods."""
+    return [
+        action(fain, i + 1, f"{start_fy + i}-05-15", 100, (f"{start_fy + i}-09-01", f"{start_fy + i + 1}-08-31"),
+               action_type="A1" if i == 0 else "B1")
+        for i in range(years)
+    ]
+
+
 def one_grant(project):
     write_actions(project.raw_usaspending, PULL, [
         action("P047A220001", 1, "2022-05-15", 100, ("2022-09-01", "2023-08-31"), action_type="A1"),
@@ -189,3 +201,115 @@ def test_outside_a_git_checkout_the_run_warns_and_records_no_commit(project):
     assert "Warning: not a git checkout" in result.output
     sidecar = json.loads((project.output / f"target_list_{PULL}.csv.provenance.json").read_text())
     assert sidecar["commit"] is None and sidecar["dirty"] is None
+
+
+# ------------------------------------------------- run log and row counts
+
+
+def run_log(project) -> list[dict]:
+    return pl.read_parquet(project.output / "run_log.parquet").to_dicts()
+
+
+def drops(row: dict) -> dict[str, int]:
+    return {d["reason"]: d["rows"] for d in row["drops"]}
+
+
+def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(project):
+    write_actions(project.raw_usaspending, PULL, [
+        *grant_rows("P047A220001", 2022, 3),                                      # in the universe
+        *grant_rows("P047A150002", 2015, 2),                                      # ended before FY2021
+        action("P047X220003", 1, "2022-05-15", 100, ("2022-09-01", "2023-08-31")),  # no Program has prefix P047X
+        action("P103A220004", 1, "2022-05-15", 100, ("2022-09-01", "2023-08-31"), listing="84.103"),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    clean, join, report = run_log(project)
+    assert len({clean["run_id"], join["run_id"], report["run_id"]}) == 1
+    assert (clean["layer"], clean["source"]) == ("clean", "usaspending")
+    assert (clean["rows_in"], clean["rows_out"]) == (7, 6)
+    assert drops(clean) == {"not_a_trio_gear_up_listing": 1}
+    assert clean["pull_date"] == dt.date(2026, 10, 7) and len(clean["input_hash"]) == 64
+
+    assert (join["layer"], join["source"]) == ("join", "grant_universe")
+    assert (join["rows_in"], join["rows_out"]) == (6, 3)
+    assert drops(join) == {"fain_prefix_names_no_program": 1, "grant_outside_reporting_window": 2}
+    assert join["pull_date"] == dt.date(2026, 10, 7) and len(join["input_hash"]) == 64
+
+    assert (report["layer"], report["source"]) == ("report", "target_list")
+    assert (report["rows_in"], report["rows_out"], drops(report)) == (1, 1, {})
+
+
+def test_the_run_log_is_append_only(project):
+    one_grant(project)
+
+    project.topo("run", "--as-of", PULL)
+    first = run_log(project)
+    project.topo("run", "--as-of", PULL)
+    second = run_log(project)
+
+    assert len(first) == 3 and second[:3] == first and len(second) == 6
+    assert second[3]["run_id"] != first[0]["run_id"]
+
+
+def test_a_row_count_mismatch_between_layers_stops_the_run(project):
+    one_grant(project)
+    project.topo("clean", "usaspending")
+    cleaned = project.root / "data/cleaned/usaspending_actions.parquet"
+    pl.read_parquet(cleaned).head(1).write_parquet(cleaned)  # one row lost between clean and join
+
+    result = project.topo("join", "--as-of", PULL, expect_exit=2)
+
+    assert "row-count mismatch: join read 1 usaspending rows but clean wrote 2" in result.output
+    assert not (project.root / "data/joined/grants.parquet").exists()
+
+
+def test_other_problems_only_warn(project):
+    write_actions(project.raw_usaspending, PULL, [
+        *grant_rows("P047A220001", 2022, 3),
+        action("P047X220003", 1, "2022-05-15", 100, ("2022-09-01", "2023-08-31")),
+    ])
+
+    result = project.topo("run", "--as-of", PULL)
+
+    assert "Warning: 1 actions in grant_universe_exceptions (fain_prefix_names_no_program)" in result.output
+    assert len(project.read_csv(f"target_list_{PULL}.csv")) == 1
+
+
+# ----------------------------------------------------------------- API keys
+
+
+def test_the_census_api_key_is_read_from_an_environment_variable(project, monkeypatch):
+    from topo.api_keys import api_key
+    from topo.config import load_config
+
+    monkeypatch.setenv("CENSUS_API_KEY", "key-from-env")
+
+    assert api_key(load_config(project.config), "census") == "key-from-env"
+
+
+def test_the_census_api_key_can_come_from_a_git_ignored_dot_env_file(project, monkeypatch):
+    from topo.api_keys import api_key
+    from topo.config import load_config
+
+    monkeypatch.delenv("CENSUS_API_KEY", raising=False)
+    (project.root / ".env").write_text("# local secrets\nCENSUS_API_KEY=key-from-dot-env\n")
+
+    assert api_key(load_config(project.config), "census") == "key-from-dot-env"
+    ignored = subprocess.run(["git", "check-ignore", "-q", ".env"], cwd=REPO_ROOT)
+    assert ignored.returncode == 0
+
+
+def test_a_missing_or_unknown_api_key_is_a_structural_break(project, monkeypatch):
+    from topo.api_keys import api_key
+    from topo.config import load_config
+    from topo.guards import StructuralBreak
+
+    monkeypatch.delenv("CENSUS_API_KEY", raising=False)
+    config = load_config(project.config)
+
+    with pytest.raises(StructuralBreak, match="CENSUS_API_KEY"):
+        api_key(config, "census")
+    with pytest.raises(StructuralBreak, match="only the Census"):
+        api_key(config, "usaspending")
+    assert "key-from" not in project.config.read_text()

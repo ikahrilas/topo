@@ -30,3 +30,9 @@ pull_from_fy = 2015
 # says which archive files are downloaded. `bulk_agency_id` is USAspending's
 # id for list_monthly_files (ED = 80).
 archive_agencies = [{ toptier_code = "091", bulk_agency_id = 80 }]
+
+[api_keys]
+# Environment variables holding API keys (never the keys themselves). Set them in
+# the shell or in a .env file beside this one; .env is git-ignored. Only the
+# Census API takes a key.
+census = "CENSUS_API_KEY"
