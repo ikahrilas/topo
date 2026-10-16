@@ -51,8 +51,16 @@ What happened to a Grant's funding for one Budget period, read from its funding 
 _Avoid_: Non-continued, terminated, reinstated (as status values; those name a cause)
 
 **Lifecycle stage**:
-Where a Grant sits in its project period, such as its first or final Budget period.
+Where a Grant sits in its project period: new, continuing, final Budget period, ended, or re-competing soon.
 _Avoid_: Status (alone)
+
+**Predicted due date**:
+The expected application deadline of a Program's next competition: the prior Cohort's published deadline plus 60 months. Set per Cohort, never per Grant; tagged _notice published_ or _inferred_.
+_Avoid_: Renewal date, end date (a Grant's end date is a separate fact)
+
+**Re-competing soon**:
+A Lifecycle stage for a Grant whose Cohort's Predicted due date is 12 months or less away and whose latest readable Funding status is continued or funded late. Not used for GEAR UP.
+_Avoid_: At-risk, expiring
 
 **2025–26 disruption**:
 A Grant whose funding was missing, late, or reversed for a Budget period starting in the 2025–26 policy window, whether or not it was later restored; a pattern, not proof of a policy cut.
