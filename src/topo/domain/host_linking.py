@@ -26,7 +26,10 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+import pandera.polars as pa
 import polars as pl
+
+from topo.guards import StructuralBreak, check_schema
 
 MATCHED = "matched"
 NO_SINGLE_HOST = "no_single_host"
@@ -283,3 +286,84 @@ def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
     if kind == NONPROFIT:
         return result(NO_SINGLE_HOST, "nonprofit_no_site_named")
     return result(UNMATCHED, f"no_candidate_{kind.lower()}")
+
+
+# ------------------------------------------------------------ joined tables
+
+
+class HostLinks(pa.DataFrameModel):
+    """One Host link per Grant (FAIN): every outcome, none dropped."""
+
+    fain: str = pa.Field(unique=True)
+    outcome: str = pa.Field(isin=list(HOST_CONFIDENCE))
+    case_label: str
+    host_kind: str = pa.Field(nullable=True, isin=[UNITID, LEAID])
+    host_id: str = pa.Field(nullable=True)
+    host_name: str = pa.Field(nullable=True)
+    host_confidence: str = pa.Field(isin=list(HOST_CONFIDENCE.values()))
+
+    class Config:
+        strict = True
+
+
+class HostLinkCandidates(pa.DataFrameModel):
+    """The candidates behind each link with their signals (`+`-joined); none for unmatched."""
+
+    fain: str
+    host_kind: str = pa.Field(isin=[UNITID, LEAID])
+    host_id: str
+    host_name: str
+    signals: str
+
+    class Config:
+        strict = True
+        unique = ["fain", "host_kind", "host_id"]
+
+
+def grant_facts(grants: pl.DataFrame, actions: pl.DataFrame) -> list[GrantFacts]:
+    """Linker input per Grant: Recipient from the Grant table, business types from its latest action."""
+    business_types = (
+        actions.sort(
+            "action_date", pl.col("modification_number").cast(pl.Int64, strict=False),
+            descending=True, nulls_last=True,
+        )
+        .group_by("fain", maintain_order=True)
+        .agg(pl.col("business_types").drop_nulls().first())
+    )
+    rows = grants.select("fain", "recipient_name", "recipient_uei", "recipient_state").join(
+        business_types, on="fain", how="left"
+    )
+    return [GrantFacts(**r) for r in rows.iter_rows(named=True)]
+
+
+def build_host_links(
+    grants: pl.DataFrame, actions: pl.DataFrame, lookups: HostLookups
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Link every Grant; returns (host_links, host_link_candidates). One link per Grant-table row."""
+    links = [link_host(facts, lookups) for facts in grant_facts(grants, actions)]
+    link_rows = pl.DataFrame(
+        [
+            {
+                "fain": link.fain, "outcome": link.outcome, "case_label": link.case_label,
+                "host_kind": link.host_kind, "host_id": link.host_id, "host_name": link.host_name,
+                "host_confidence": link.host_confidence,
+            }
+            for link in links
+        ],
+        schema={c: pl.String for c in HostLinks.to_schema().columns},
+    ).sort("fain")
+    candidate_rows = pl.DataFrame(
+        [
+            {"fain": link.fain, "host_kind": c.host_kind, "host_id": c.host_id, "host_name": c.host_name,
+             "signals": "+".join(c.signals)}
+            for link in links
+            for c in link.candidates
+        ],
+        schema={c: pl.String for c in HostLinkCandidates.to_schema().columns},
+    ).sort("fain", "host_kind", "host_id")
+    if link_rows.height != grants.height:
+        raise StructuralBreak(f"Host links have {link_rows.height} rows for {grants.height} Grants")
+    return (
+        check_schema(HostLinks, link_rows, "Host links"),
+        check_schema(HostLinkCandidates, candidate_rows, "Host link candidates"),
+    )

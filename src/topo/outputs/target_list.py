@@ -15,13 +15,18 @@ import polars as pl
 
 from topo.domain.grant_universe import GrantUniverse
 from topo.fiscal import fy_label
+from topo.guards import StructuralBreak
 from topo.outputs.delivery import delivery_path, write_new
 
 STEM = "target_list"
 
 
-def build_target_list(universe: GrantUniverse, as_of: dt.date) -> pl.DataFrame:
-    """The target-list rows, in display column order."""
+def build_target_list(universe: GrantUniverse, as_of: dt.date, *, host_links: pl.DataFrame) -> pl.DataFrame:
+    """The target-list rows, in display column order.
+
+    `host_links` is the joined Host-links table (topo.domain.host_linking.HostLinks),
+    one row per FAIN; the Host sits next to the Recipient name and UEI.
+    """
     window = universe.window
     labels = [fy_label(fy) for fy in window.fiscal_years]
     amounts = universe.fy_obligations.with_columns(
@@ -45,14 +50,30 @@ def build_target_list(universe: GrantUniverse, as_of: dt.date) -> pl.DataFrame:
         )
     )
     grants = universe.grants
+    # Every Grant keeps its row whatever its Host outcome (review and unmatched included).
+    missing = grants.join(host_links, on="fain", how="anti")
+    if missing.height:
+        raise StructuralBreak(f"{missing.height} Grants have no Host link: {', '.join(missing['fain'].head(10))}")
+    hosts = host_links.select(
+        "fain",
+        pl.col("host_name").alias("Host institution"),
+        pl.concat_str("host_kind", pl.lit(" "), "host_id").alias("Host ID"),
+        pl.col("host_confidence").alias("Host confidence"),
+        pl.col("case_label").alias("Case label"),
+    )
     return (
-        grants.join(latest, on="fain", how="left")
+        grants.join(hosts, on="fain", how="left")
+        .join(latest, on="fain", how="left")
         .join(wide.select("fain", *labels), on="fain", how="left")
         .with_columns(pl.col(labels).fill_null(0.0), pl.col("Cumulative obligation").fill_null(0.0))
         .sort("recipient_state", "program", "fain", nulls_last=True)
         .select(
             pl.col("recipient_name").alias("Recipient"),
             pl.col("recipient_uei").alias("Recipient UEI"),
+            "Host institution",
+            "Host ID",
+            "Host confidence",
+            "Case label",
             pl.col("recipient_state").alias("State"),
             pl.col("program").alias("Program"),
             pl.col("fain").alias("FAIN"),
