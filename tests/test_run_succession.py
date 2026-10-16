@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 
 import polars as pl
+import pytest
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, write_csv
 from support.usaspending import action, write_actions
 
@@ -58,6 +59,47 @@ def test_a_lookback_grant_links_to_the_grant_that_renewed_it_but_adds_no_amounts
     fy_columns = [c for c in rows[0] if c.startswith("FY20")]
     assert fy_columns == ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025", "FY2026"]
     assert float(rows[0]["Cumulative obligation"]) == 4 * 300000  # FY2020's A1 is lookback
+
+
+FOUNDATION = dict(recipient="ROCKY MOUNTAIN COLLEGE FOUNDATION", uei="RMCFOUND0001", state="MT",
+                  business_types_description=IHE)
+
+
+@pytest.mark.parametrize(
+    "earlier, later",
+    [
+        pytest.param(("P042A150001", ROCKY), ("P042A200002", FOUNDATION), id="same Host, another Recipient"),
+        pytest.param(("P042A150001", ROCKY), ("P047A200002", ROCKY), id="same Recipient and Host, another Program"),
+        pytest.param(("P042A150001", CARROLL), ("P042A200002", CARROLL), id="no Host institution to compare"),
+    ],
+)
+def test_succession_needs_the_same_recipient_program_and_host_institution(project, earlier, later):
+    write_actions(project.raw_usaspending, PULL, [
+        *five_years(earlier[0], "2015-07-01", 2015, **earlier[1]),
+        *five_years(later[0], "2020-07-01", 2020, **later[1]),
+    ])
+    write_ipeds(project, directory_row("180595", "Rocky Mountain College", "MT",
+                                       ueis=("RMCUEI000001", "RMCFOUND0001")))
+
+    project.topo("run", "--as-of", PULL)
+
+    assert successions(project) == []
+
+
+def test_lookback_reaches_back_to_fy2010_for_trio_and_fy2015_for_gear_up(project):
+    gear_up = dict(ROCKY, business_types_description="STATE GOVERNMENT")
+    write_actions(project.raw_usaspending, PULL, [
+        *five_years("P042A050001", "2005-07-01", 2005, **ROCKY),  # ended 2010-08-31: FY2010
+        *five_years("P042A040002", "2004-07-01", 2004, **ROCKY),  # ended 2009-08-31: before the lookback
+        *five_years("P334A100003", "2010-07-01", 2010, **gear_up),  # ended 2015-08-31: FY2015
+        *five_years("P334A090004", "2009-07-01", 2009, **gear_up),  # ended 2014-08-31: before the lookback
+        *five_years("P042A200005", "2020-07-01", 2020, **ROCKY),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    assert sorted(joined(project, "lookback_grants")["fain"]) == ["P042A050001", "P334A100003"]
+    assert [r["FAIN"] for r in project.read_csv(f"target_list_{PULL}.csv")] == ["P042A200005"]
 
 
 def d(text: str) -> dt.date:
