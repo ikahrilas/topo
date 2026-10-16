@@ -49,6 +49,7 @@ DIRECTORY_KEEP = [
     "unitid", "year", "inst_name", "inst_alias", "ueis", "state_abbr", "city", "zip",
     "inst_system_name", "sector", "newid",
 ]
+DIRECTORY_OPTIONAL = ["address"]  # street address, read when present (Census geocoder fallback); null otherwise
 # Fall-enrollment breakdown columns; 99 means "total" in each.
 ENROLLMENT_BREAKDOWNS = ["ftpt", "level_of_study", "degree_seeking", "class_level", "sex", "race"]
 
@@ -64,6 +65,7 @@ class IpedsDirectory(pa.DataFrameModel):
     state_abbr: str = pa.Field(nullable=True)
     city: str = pa.Field(nullable=True)
     zip: str = pa.Field(nullable=True)
+    address: str = pa.Field(nullable=True)
     inst_system_name: str = pa.Field(nullable=True)
     sector: int = pa.Field(nullable=True)
     newid: str = pa.Field(nullable=True)
@@ -167,10 +169,12 @@ def clean_directory(
 ) -> pl.DataFrame:
     """Raw Urban directory rows (all strings) -> the cleaned directory history."""
     raw = raw.lazy()
-    _require(DIRECTORY_KEEP, raw.collect_schema().names(), raw_file)
+    header = raw.collect_schema().names()
+    _require(DIRECTORY_KEEP, header, raw_file)
+    optional = [c if c in header else pl.lit(None, dtype=pl.String).alias(c) for c in DIRECTORY_OPTIONAL]
     directory = (
-        raw.select(DIRECTORY_KEEP)
-        .with_columns(_urban_nulls(DIRECTORY_KEEP))
+        raw.select(*DIRECTORY_KEEP, *optional)
+        .with_columns(_urban_nulls(DIRECTORY_KEEP + DIRECTORY_OPTIONAL))
         .with_columns(pl.col("year").cast(pl.Int64), pl.col("sector").cast(pl.Int64))
         .filter(pl.col("year") >= from_year)
         .with_columns(pl.lit(raw_file).alias("raw_file"), pl.lit(pull_date).alias("pull_date"))

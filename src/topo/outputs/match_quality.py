@@ -5,9 +5,10 @@ sample size and gating; overrides in force; review and unmatched lists by FAIN;
 Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
 with no UEI; breakdowns by Program and by start year; Pull date, As-of date and
 input hashes. Dollars are obligations over the reporting-window fiscal years.
-The founder spot-check block counts Review findings by review date, apart from
-the answer key. Later tickets add the renewal-timing backtest, the observed-gap
-table and context reason codes.
+Context reason codes: Grants per Local context reason code (#38), every code
+listed. The founder spot-check block counts Review findings by review date,
+apart from the answer key. Later tickets add the renewal-timing backtest and the
+observed-gap table.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import polars as pl
 
 from topo.domain.host_gating import Gate
 from topo.domain.host_linking import MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
+from topo.domain.local_context import context_reason_counts
 from topo.fiscal import fiscal_year
 from topo.outputs.delivery import delivery_path, write_new
 from topo.outputs.review_queue import grant_dollars
@@ -42,6 +44,7 @@ class MatchQualityInputs:
     answer_key_rows: int
     tuning_set_rows: int
     input_hashes: list[tuple[str, str]]  # (path, sha256)
+    local_context: pl.DataFrame | None = None  # joined local_context (topo.domain.local_context.LocalContext)
     founder_spot_check: pl.DataFrame | None = None  # topo.review_findings.spot_check_summary
 
 
@@ -210,6 +213,17 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
     out += ["", "## By start year", "", "Fiscal year of the Grant's project start.", ""]
     out += _table(["Start FY", *header], _outcome_counts(by_year, "start_fy"))
 
+    if inputs.local_context is not None:
+        reasons = context_reason_counts(inputs.local_context)
+        out += [
+            "",
+            "## Context reason codes",
+            "",
+            "Grants whose Local context is blank, in whole or in part, by reason. Context comes only through the "
+            "Host institution, never the Recipient or the state. A Grant can carry more than one code.",
+            "",
+        ]
+        out += _table(["Context reason", "Grants"], reasons.rows())
     out += _founder_spot_check(inputs.founder_spot_check)
 
     out += ["", "## Inputs", ""]

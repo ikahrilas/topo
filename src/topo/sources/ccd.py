@@ -7,8 +7,10 @@ configured URL under `/api/` stops the pull.
 Cleaned table:
     ccd_lea_directory  one row per (LEAID, year) from `[ccd] directory_from_year`,
                        for the district agency types in `[ccd] agency_types`:
-                       name, state, city, ZIP and agency type. This history is
-                       what the Host linker reads for district Hosts.
+                       name, state, city, ZIP, agency type and enrollment (when the
+                       file has an `enrollment` column; else null). This history is
+                       what the Host linker reads for district Hosts; Local context
+                       reads the latest year's agency type and enrollment.
 
 Urban codes missing values as -1, -2 or -3; clean turns them into nulls.
 Without any CCD pull, `clean` is a no-op: the linker then sees no districts and
@@ -45,6 +47,7 @@ URBAN_MISSING = ["-1", "-2", "-3"]
 
 # Urban LEA directory columns read; nothing else (no phone, no officials).
 LEA_KEEP = ["leaid", "year", "lea_name", "state_location", "city_location", "zip_location", "agency_type"]
+LEA_OPTIONAL = ["enrollment"]  # read when present (Local context); null otherwise
 
 
 class CcdLeaDirectory(pa.DataFrameModel):
@@ -57,6 +60,7 @@ class CcdLeaDirectory(pa.DataFrameModel):
     city_location: str = pa.Field(nullable=True)
     zip_location: str = pa.Field(nullable=True)
     agency_type: int
+    enrollment: int = pa.Field(nullable=True)
     raw_file: str
     pull_date: dt.date
 
@@ -130,10 +134,16 @@ def clean_lea_directory(
     missing = sorted(set(LEA_KEEP) - set(raw.collect_schema().names()))
     if missing:
         raise StructuralBreak(f"{raw_file} lacks columns: {', '.join(missing)}")
+    header = raw.collect_schema().names()
+    optional = [c if c in header else pl.lit(None, dtype=pl.String).alias(c) for c in LEA_OPTIONAL]
+    columns = LEA_KEEP + LEA_OPTIONAL
     leas = (
-        raw.select(LEA_KEEP)
-        .with_columns(pl.col(c).str.strip_chars().replace(["", *URBAN_MISSING], None).alias(c) for c in LEA_KEEP)
-        .with_columns(pl.col("year").cast(pl.Int64), pl.col("agency_type").cast(pl.Int64))
+        raw.select(*LEA_KEEP, *optional)
+        .with_columns(pl.col(c).str.strip_chars().replace(["", *URBAN_MISSING], None).alias(c) for c in columns)
+        .with_columns(
+            pl.col("year").cast(pl.Int64), pl.col("agency_type").cast(pl.Int64),
+            pl.col("enrollment").cast(pl.Float64).cast(pl.Int64),
+        )
         .filter(pl.col("year") >= from_year, pl.col("agency_type").is_in(agency_types))
         .with_columns(pl.lit(raw_file).alias("raw_file"), pl.lit(pull_date).alias("pull_date"))
         .collect()

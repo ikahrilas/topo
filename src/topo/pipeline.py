@@ -28,6 +28,7 @@ from topo.domain.grant_universe import (
 )
 from topo.domain.host_gating import Gate, apply_overrides, check_separate, gate_and_override, gate_host_links
 from topo.domain.host_linking import LEAID, UNITID, HostLookups, build_host_links
+from topo.domain.local_context import build_local_context, locate_campus_districts
 from topo.domain.renewal_timing import (
     RenewalSettings,
     new_award_fys,
@@ -67,7 +68,7 @@ from topo.outputs.match_quality import MatchQualityInputs, render_match_quality,
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
 from topo.review_findings import last_founder_marks, read_review_findings, spot_check_summary
 from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
-from topo.sources import SOURCES, ccd, ed_grantee_lists, fac, ipeds, usaspending
+from topo.sources import SOURCES, ccd, census_geocoder, ed_grantee_lists, edge, fac, ipeds, saipe, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
@@ -90,6 +91,9 @@ COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date,
 GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
 SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
 HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
+# Local context (#38).
+CAMPUS_DISTRICTS = "campus_districts"  # (UNITID, LEAID): every district a college Host's campus lies in
+LOCAL_CONTEXT = "local_context"  # one row per FAIN: context via the Host, each field with its data year
 # Renewal timing (#40).
 COHORT_TIMING = "cohort_timing"  # (Program, Cohort FY): observed gap, Predicted due date, evidence tier
 RENEWAL_TIMING = "renewal_timing"  # one row per FAIN: Cohort timing, Re-competing soon, GEAR UP end-date fact
@@ -161,6 +165,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
     host_links, after_rules = _join_host_links(config, universe, actions, lookups)
     successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
+    _join_local_context(config, host_links, pull_date)
     _join_funding_status(config, universe, context, successors)
     _join_renewal_timing(config, universe, actions, context)
     _join_ed_lists(config, universe, actions, pull_date)
@@ -168,6 +173,41 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     _join_fac_plausibility(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
+
+
+def _join_local_context(config: Config, host_links: pl.DataFrame, pull_date: dt.date) -> None:
+    """Campus districts of college Hosts and one Local context row per Grant, via its final Host link only."""
+    colleges = host_links.filter(pl.col("host_kind") == UNITID)["host_id"].unique()
+    points = edge.read_geocodes(config).filter(pl.col("unitid").is_in(colleges.implode()))
+    polygons = config.layout.cleaned_table(edge.DISTRICTS_TABLE)
+    campus_districts = locate_campus_districts(
+        points, polygons if polygons.exists() else None, census_geocoder.read_campus_districts(config)
+    )
+    context = build_local_context(
+        host_links,
+        ipeds_directory=ipeds.read_directory(config),
+        ipeds_enrollment=ipeds.read_enrollment(config),
+        lea_directory=ccd.read_lea_directory(config),
+        campus_districts=campus_districts,
+        saipe=saipe.read_school_districts(config),
+    )
+    inputs = [
+        config.layout.cleaned_table(name)
+        for name in (
+            ipeds.DIRECTORY_TABLE, ipeds.ENROLLMENT_TABLE, ccd.LEA_DIRECTORY_TABLE, edge.GEOCODES_TABLE,
+            edge.DISTRICTS_TABLE, saipe.TABLE, census_geocoder.TABLE,
+        )
+    ]
+    run_log.record(
+        config, layer="join", source=LOCAL_CONTEXT, rows_in=host_links.height, rows_out=context.height,
+        drops={}, pull_date=pull_date,
+        input_hash=provenance.combined_hash(
+            f"{p.name} {provenance.file_sha256(p)}" for p in [config.layout.joined_table(HOST_LINKS), *inputs]
+            if p.exists()
+        ),
+    )
+    campus_districts.write_parquet(config.layout.joined_table(CAMPUS_DISTRICTS))
+    context.write_parquet(config.layout.joined_table(LOCAL_CONTEXT))
 
 
 def _join_host_links(
@@ -427,6 +467,7 @@ def report(config: Config) -> Delivered:
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
+    local_context = pl.read_parquet(config.layout.joined_table(LOCAL_CONTEXT))
     cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
     findings = read_review_findings(config)
     settings = TargetListSettings.from_section(config.section("target_list"))
@@ -434,6 +475,7 @@ def report(config: Config) -> Delivered:
         universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
         cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
         timing=pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING)),
+        local_context=local_context,
         founder_marks=last_founder_marks(findings),
     )
     run_log.record(
@@ -441,7 +483,7 @@ def report(config: Config) -> Delivered:
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS, RENEWAL_TIMING)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS, RENEWAL_TIMING, LOCAL_CONTEXT)
         ),
     )
     readme = ReadmeFacts(
@@ -479,6 +521,7 @@ def report(config: Config) -> Delivered:
             answer_key_rows=curated.read_answer_key(config).height,
             tuning_set_rows=curated.read_tuning_set(config).height,
             input_hashes=_input_hashes(config),
+            local_context=local_context,
             founder_spot_check=spot_check_summary(findings),
         )
     )

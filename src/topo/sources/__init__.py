@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from topo.sources import ccd, ed_grantee_lists, fac, ipeds, usaspending
+from topo.sources import ccd, census_geocoder, ed_grantee_lists, edge, fac, ipeds, saipe, usaspending
 
 SOURCES: dict[str, ModuleType] = {
     usaspending.SOURCE: usaspending,
@@ -19,4 +19,7 @@ SOURCES: dict[str, ModuleType] = {
     ed_grantee_lists.SOURCE: ed_grantee_lists,
     ccd.SOURCE: ccd,
     fac.SOURCE: fac,
+    edge.SOURCE: edge,
+    saipe.SOURCE: saipe,
+    census_geocoder.SOURCE: census_geocoder,  # after edge and ipeds: a fallback for Hosts with no EDGE point
 }
