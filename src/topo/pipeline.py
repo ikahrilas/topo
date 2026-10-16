@@ -14,15 +14,22 @@ from pathlib import Path
 
 import polars as pl
 
-from topo import provenance, run_log
+from topo import curated_totals, provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
 from topo.domain.ed_lists import NOT_IN_USASPENDING, join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
 from topo.domain.grant_universe import EXCEPTION_UNKNOWN_FAIN_PREFIX, GrantUniverse, build_grant_universe
 from topo.domain.host_linking import HostLookups, build_host_links
+from topo.domain.reconciliation import (
+    RECONCILED,
+    ReconciliationInputs,
+    Tolerances,
+    build_reconciliation,
+)
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
+from topo.outputs.reconciliation import write_reconciliation_csv
 from topo.outputs.target_list import build_target_list, write_target_list_csv
 from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
 
@@ -34,6 +41,7 @@ HOST_LINKS = "host_links"  # one row per FAIN: outcome, Case label, Host, Host c
 HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its signals
 FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
 GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
+RECONCILIATION = "reconciliation"  # one row per (check, Program, FY)
 
 
 @dataclass(frozen=True)
@@ -104,6 +112,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     _join_funding_status(config, universe, context)
     _join_ed_lists(config, universe, actions, pull_date)
+    _join_reconciliation(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
 
@@ -181,6 +190,30 @@ def _log_ed_lists(
     )
 
 
+def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Compare with outside totals; a duplicate key stops the run, misses only warn."""
+    curated_totals.record_inputs(config)
+    inputs = ReconciliationInputs(
+        window=universe.window,
+        pull_date=context.pull_date,
+        appropriations=curated_totals.read_appropriations(config),
+        allocations=curated_totals.read_allocations(config),
+        grants=universe.grants,
+        grant_actions=universe.grant_actions,
+    )
+    result = build_reconciliation(inputs, Tolerances.from_config(config))
+    table = result.table
+    misses = table.filter(pl.col("reconciliation_status") != RECONCILED).filter(
+        ~pl.col("gap_reason_code").is_in(["not_published", "no_ed_list"])
+    )
+    if misses.height:
+        named = "; ".join(
+            f"{code} {n}" for code, n in misses.group_by("gap_reason_code").len().sort("gap_reason_code").iter_rows()
+        )
+        warn(f"{misses.height} reconciliation rows do not reconcile ({named})")
+    table.write_parquet(config.layout.joined_table(RECONCILIATION))
+
+
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
     joined = config.layout.joined
     context_path = joined / RUN_CONTEXT
@@ -201,6 +234,7 @@ def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
 @dataclass(frozen=True)
 class Delivered:
     target_list_csv: Path
+    reconciliation_csv: Path
 
 
 def report(config: Config) -> Delivered:
@@ -218,7 +252,20 @@ def report(config: Config) -> Delivered:
     )
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
-    return Delivered(target_list_csv=path)
+    reconciliation_csv = _report_reconciliation(config, context)
+    return Delivered(target_list_csv=path, reconciliation_csv=reconciliation_csv)
+
+
+def _report_reconciliation(config: Config, context: RunContext) -> Path:
+    source = config.layout.joined_table(RECONCILIATION)
+    table = pl.read_parquet(source)
+    run_log.record(
+        config, layer="report", source=RECONCILIATION, rows_in=table.height, rows_out=table.height, drops={},
+        pull_date=context.pull_date, input_hash=provenance.file_sha256(source),
+    )
+    path = write_reconciliation_csv(table, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
+    return path
 
 
 def run(config: Config, as_of: dt.date | None = None) -> Delivered:
