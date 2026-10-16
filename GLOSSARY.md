@@ -25,8 +25,30 @@ One federal grant program a Grant belongs to, such as Upward Bound or GEAR UP st
 _Avoid_: CFDA, listing (those name the federal number, not the program)
 
 **Continuation**:
-A yearly funding action that extends an existing Grant into its next budget period.
+A yearly funding action that extends an existing Grant into its next Budget period.
 _Avoid_: Renewal
+
+**Budget period**:
+The stretch of a Grant, usually 12 months, that one Continuation (or the initial award) funds; it can start in a different fiscal year from the action that funds it.
+_Avoid_: Award year, grant year
+
+**Cohort**:
+The Grants of one Program awarded in one competition.
+_Avoid_: Class, slate (when meaning the Grants rather than the notice)
+
+## Grant status
+
+**Funding status**:
+What happened to a Grant's funding for one Budget period, read from its funding actions; it describes the pattern, never the cause.
+_Avoid_: Non-continued, terminated, reinstated (as status values; those name a cause)
+
+**Lifecycle stage**:
+Where a Grant sits in its project period, such as its first or final Budget period.
+_Avoid_: Status (alone)
+
+**2025–26 disruption**:
+A Grant whose funding was missing, late, or reversed for a Budget period starting in the 2025–26 policy window, whether or not it was later restored; a pattern, not proof of a policy cut.
+_Avoid_: Cut, at-risk (those imply a cause or a forecast)
 
 ## Language notes
 
