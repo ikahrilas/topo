@@ -23,7 +23,7 @@ from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak
 from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.target_list import build_target_list, write_target_list_csv
-from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
+from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
@@ -89,9 +89,8 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
-    host_links, host_link_candidates = build_host_links(
-        universe.grants, actions, HostLookups.from_directory(ipeds.read_directory(config))
-    )
+    lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
+    host_links, host_link_candidates = build_host_links(universe.grants, actions, lookups)
     host_links.write_parquet(config.layout.joined_table(HOST_LINKS))
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     _join_funding_status(config, universe, context)
