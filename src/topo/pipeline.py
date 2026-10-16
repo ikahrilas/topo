@@ -64,7 +64,8 @@ from topo.outputs.frozen_predictions import (
     write_frozen_predictions,
     write_scored_predictions,
 )
-from topo.outputs.funding_status_history import append_funding_status_history
+from topo.outputs.funding_status_history import DROP_ALREADY_IN_HISTORY, append_funding_status_history
+from topo.outputs.funding_status_history import SOURCE as HISTORY_SOURCE
 from topo.domain.cause_notes import FILE_NAME as CAUSE_NOTES_FILE
 from topo.domain.cause_notes import read_cause_notes
 from topo.outputs.target_list import (
@@ -323,7 +324,15 @@ def _join_funding_status(
     )
     periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
     per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
-    append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
+    history = append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
+    run_log.record(
+        config, layer="join", source=HISTORY_SOURCE, rows_in=periods.height, rows_out=history.added.height,
+        drops={DROP_ALREADY_IN_HISTORY: history.already_in_history}, pull_date=context.pull_date,
+        input_hash=provenance.file_sha256(config.layout.joined_table(FUNDING_STATUS)),
+    )
+    provenance.write_sidecar(
+        config, history.path, as_of=context.as_of, pull_date=context.pull_date, appended=True
+    )
 
 
 def _join_renewal_timing(

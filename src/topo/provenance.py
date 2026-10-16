@@ -140,8 +140,14 @@ def sidecar_path(output: Path) -> Path:
     return output.with_name(output.name + SIDECAR_SUFFIX)
 
 
-def write_sidecar(config: Config, output: Path, *, as_of: dt.date, pull_date: dt.date) -> Path:
-    """Write `<output>.provenance.json` next to a delivered file (never overwriting one)."""
+def write_sidecar(
+    config: Config, output: Path, *, as_of: dt.date, pull_date: dt.date, appended: bool = False
+) -> Path:
+    """Write `<output>.provenance.json` next to a delivered file (never overwriting one).
+
+    An `appended` output (the append-only Funding status history) is one file that every
+    run extends; its sidecar is replaced to describe the run that last appended to it.
+    """
     run = current_run(config)
     sidecar = {
         "output": output.name,
@@ -154,6 +160,12 @@ def write_sidecar(config: Config, output: Path, *, as_of: dt.date, pull_date: dt
         "raw_files": raw_inputs(config),
     }
     path = sidecar_path(output)
+    text = json.dumps(sidecar, indent=2) + "\n"
+    if appended:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text)
+        tmp.replace(path)
+        return path
     with path.open("x") as f:
-        f.write(json.dumps(sidecar, indent=2) + "\n")
+        f.write(text)
     return path

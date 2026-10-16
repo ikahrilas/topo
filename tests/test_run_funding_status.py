@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import polars as pl
 from support.usaspending import action, write_actions
@@ -103,3 +104,20 @@ def test_each_run_appends_a_funding_status_snapshot_keyed_by_fain_budget_period_
 
 def d(text: str) -> dt.date:
     return dt.date.fromisoformat(text)
+
+
+def test_the_history_gets_a_run_log_row_per_append_and_a_sidecar_for_its_latest_append(project):
+    write_actions(project.raw_usaspending, PULL, AUGSBURG_MCNAIR)
+
+    project.topo("run", "--as-of", "2026-04-01")
+    project.topo("run", "--as-of", PULL)
+    project.topo("run", "--as-of", PULL)
+
+    log = pl.read_parquet(project.output / "run_log.parquet").filter(
+        (pl.col("layer") == "join") & (pl.col("source") == "funding_status_history")
+    )
+    assert log.select("rows_in", "rows_out").rows() == [(4, 4), (5, 5), (5, 0)]
+    assert log["drops"].to_list()[-1] == [{"reason": "already_in_history", "rows": 5}]
+    sidecar = json.loads((project.output / f"{HISTORY}.provenance.json").read_text())
+    assert (sidecar["output"], sidecar["as_of"], sidecar["pull_date"]) == (HISTORY, PULL, PULL)
+    assert sidecar["run_id"] == log["run_id"].to_list()[-1]

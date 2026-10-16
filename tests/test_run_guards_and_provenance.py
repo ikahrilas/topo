@@ -262,7 +262,7 @@ def test_the_run_log_is_append_only(project):
     second = run_log(project)
 
     n = len(first)
-    assert n == 7 and second[:n] == first and len(second) == 2 * n
+    assert n == 8 and second[:n] == first and len(second) == 2 * n
     assert second[n]["run_id"] != first[0]["run_id"]
 
 
