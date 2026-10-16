@@ -225,9 +225,11 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
     project.topo("run", "--as-of", PULL)
 
     logged = {(r["layer"], r["source"]): r for r in run_log(project)}
-    clean, join = logged[("clean", "usaspending")], logged[("join", "grant_universe")]
-    funding, report = logged[("join", "grant_funding_status")], logged[("report", "target_list")]
     assert len({r["run_id"] for r in logged.values()}) == 1
+    clean, join = logged[("clean", "usaspending")], logged[("join", "grant_universe")]
+    funding, timing = logged[("join", "grant_funding_status")], logged[("join", "renewal_timing")]
+    context = logged[("join", "local_context")]
+    report, reconciliation = logged[("report", "target_list")], logged[("report", "reconciliation")]
     assert (clean["layer"], clean["source"]) == ("clean", "usaspending")
     assert (clean["rows_in"], clean["rows_out"]) == (7, 6)
     assert drops(clean) == {"not_a_trio_gear_up_listing": 1}
@@ -241,8 +243,14 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
     assert (funding["layer"], funding["source"]) == ("join", "grant_funding_status")
     assert (funding["rows_in"], funding["rows_out"], drops(funding)) == (1, 1, {})
 
+    assert (timing["rows_in"], timing["rows_out"], drops(timing)) == (1, 1, {})
+    assert (context["rows_in"], context["rows_out"], drops(context)) == (1, 1, {})
+
     assert (report["layer"], report["source"]) == ("report", "target_list")
     assert (report["rows_in"], report["rows_out"], drops(report)) == (1, 1, {})
+
+    assert (reconciliation["layer"], reconciliation["source"]) == ("report", "reconciliation")
+    assert reconciliation["rows_in"] == reconciliation["rows_out"] > 0 and drops(reconciliation) == {}
 
 
 def test_the_run_log_is_append_only(project):
@@ -254,7 +262,7 @@ def test_the_run_log_is_append_only(project):
     second = run_log(project)
 
     n = len(first)
-    assert n >= 4 and second[:n] == first and len(second) == 2 * n
+    assert n == 7 and second[:n] == first and len(second) == 2 * n
     assert second[n]["run_id"] != first[0]["run_id"]
 
 

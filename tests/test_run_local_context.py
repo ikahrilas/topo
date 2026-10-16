@@ -181,12 +181,16 @@ def test_the_match_quality_report_counts_context_reason_codes(project):
 
     project.topo("run", "--as-of", PULL)
 
-    counts = {r["Context reason"]: r["Grants"] for r in project.read_csv(f"match_quality_context_{PULL}.csv")}
+    report = (project.output / f"match_quality_{PULL}.md").read_text()
+    section = report.split("## Context reason codes")[1].split("\n## ")[0]
+    counts = dict(
+        line.strip("| ").split(" | ") for line in section.splitlines() if line.startswith("| ") and "---" not in line
+    )
     assert counts == {
-        "no_saipe_row": "1", "no_campus_district": "0", "no_enrollment_row": "0",
+        "Context reason": "Grants", "no_saipe_row": "1", "no_campus_district": "0", "no_enrollment_row": "0",
         "no_single_host": "1", "unmatched": "1", "in_review": "1",
     }
-    sidecar = json.loads((project.output / f"match_quality_context_{PULL}.csv.provenance.json").read_text())
+    sidecar = json.loads((project.output / f"match_quality_{PULL}.md.provenance.json").read_text())
     assert {f["source"] for f in sidecar["raw_files"]} >= {"edge", "saipe", "ipeds", "ccd"}
 
 

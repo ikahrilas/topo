@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, write_csv
 from support.usaspending import action, write_actions
+from support.workbook import every_row
 
 PULL = "2026-10-07"
 IHE = "PUBLIC/STATE CONTROLLED INSTITUTION OF HIGHER EDUCATION"
@@ -54,7 +55,7 @@ def test_a_lookback_grant_links_to_the_grant_that_renewed_it_but_adds_no_amounts
     project.topo("run", "--as-of", PULL)
 
     assert successions(project) == [("P042A150001", "P042A200001")]
-    rows = project.read_csv(f"target_list_{PULL}.csv")
+    rows = every_row(project.output / f"target_list_{PULL}.xlsx")
     assert [r["FAIN"] for r in rows] == ["P042A200001"]
     fy_columns = [c for c in rows[0] if c.startswith("FY20")]
     assert fy_columns == ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025", "FY2026"]
@@ -99,7 +100,7 @@ def test_lookback_reaches_back_to_fy2010_for_trio_and_fy2015_for_gear_up(project
     project.topo("run", "--as-of", PULL)
 
     assert sorted(joined(project, "lookback_grants")["fain"]) == ["P042A050001", "P334A100003"]
-    assert [r["FAIN"] for r in project.read_csv(f"target_list_{PULL}.csv")] == ["P042A200005"]
+    assert [r["FAIN"] for r in every_row(project.output / f"target_list_{PULL}.xlsx")] == ["P042A200005"]
 
 
 def mcnair_a1(fain, year):
@@ -187,7 +188,7 @@ def test_the_four_known_succession_hand_offs_are_not_read_as_reversed(project):
 
     project.topo("run", "--as-of", PULL)
 
-    status = {r["FAIN"]: r["Latest readable status"] for r in project.read_csv(f"target_list_{PULL}.csv")}
+    status = {r["FAIN"]: r["Latest readable status"] for r in every_row(project.output / f"target_list_{PULL}.xlsx")}
     assert {fain: status[fain] for fain in HANDED_OFF} == dict.fromkeys(HANDED_OFF, "continued")
     assert status["P044A210683"] == "reversed"
     periods = joined(project, "funding_status").filter(pl.col("fain").is_in(HANDED_OFF))

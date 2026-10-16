@@ -111,13 +111,13 @@ def join(as_of: AsOf = None, allow_dirty: AllowDirty = False) -> None:
 def report(allow_dirty: AllowDirty = False) -> None:
     """Write the outputs from the joined layer."""
     delivered = _guarded(lambda: pipeline.report(_config()), allow_dirty)
-    typer.echo(f"wrote {delivered.target_list_csv}")
-    typer.echo(f"wrote {delivered.match_quality_context_csv}")
+    for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
+        typer.echo(f"wrote {path}")
 
 
 @app.command()
 def run(as_of: AsOf = None, allow_dirty: AllowDirty = False) -> None:
     """Clean every source, join and report in one go."""
     delivered = _guarded(lambda: pipeline.run(_config(), _date(as_of)), allow_dirty)
-    typer.echo(f"wrote {delivered.target_list_csv}")
-    typer.echo(f"wrote {delivered.match_quality_context_csv}")
+    for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
+        typer.echo(f"wrote {path}")
