@@ -62,7 +62,7 @@ from topo.outputs.target_list import (
 )
 from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
-from topo.outputs.one_pager import OnePagerInputs, render_one_pager, write_one_pager
+from topo.outputs.one_pager import OnePagerFiles, OnePagerInputs, render_one_pager, write_one_pager
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
 from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
@@ -448,15 +448,26 @@ def report(config: Config) -> Delivered:
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, quality_path, as_of=context.as_of, pull_date=context.pull_date)
     reconciliation_csv = _report_reconciliation(config, context)
-    one_pager = _report_one_pager(config, context)
+    one_pager = _report_one_pager(config, context, universe, settings)
     return Delivered(
         target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
         reconciliation_csv=reconciliation_csv, one_pager_md=one_pager.markdown, one_pager_pdf=one_pager.pdf,
     )
 
 
-def _report_one_pager(config: Config, context: RunContext):
-    text = render_one_pager(OnePagerInputs(pull_date=context.pull_date, as_of=context.as_of))
+def _report_one_pager(
+    config: Config, context: RunContext, universe: GrantUniverse, settings: TargetListSettings
+) -> OnePagerFiles:
+    text = render_one_pager(OnePagerInputs(
+        pull_date=context.pull_date,
+        as_of=context.as_of,
+        window=context.window,
+        grants=universe.grants,
+        fy_obligations=universe.fy_obligations,
+        provisional_fys=provisional_fiscal_years(context.window, context.pull_date, settings.provisional_lag_days),
+        provisional_lag_days=settings.provisional_lag_days,
+        awaited=awaited_notes(universe, settings),
+    ))
     files = write_one_pager(text, config.layout.output, context.pull_date)
     for path in (files.markdown, files.pdf):
         provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)

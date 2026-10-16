@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
+from fpdf.fonts import FontFace
 
 FONT = "helvetica"
 SIZES = (8.5, 8.0, 7.5, 7.0, 6.5, 6.0, 5.5)  # base font sizes tried, largest first
@@ -65,7 +66,7 @@ def _draw(pdf: _Page, body: list[str]) -> None:
             pdf.set_font(FONT, "", size - 1)
             with pdf.table(
                 first_row_as_headings=True, line_height=line_h, padding=0.6, text_align="LEFT",
-                headings_style=None,
+                headings_style=FontFace(emphasis="BOLD"),
             ) as grid:
                 for row in rows:
                     cells = grid.row()

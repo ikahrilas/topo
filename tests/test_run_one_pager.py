@@ -50,3 +50,57 @@ def test_run_delivers_the_one_pager_as_markdown_and_a_one_page_pdf_with_the_cens
     for name in (MD, PDF):
         sidecar = json.loads((project.output / f"{name}.provenance.json").read_text())
         assert (sidecar["output"].endswith(name), sidecar["pull_date"], sidecar["as_of"]) == (True, PULL, PULL)
+
+
+MARKER = re.compile(r"\[([a-z]+) (\d)\]")
+
+
+def trust_items(text: str) -> list[str]:
+    """The numbered items of "How far to trust this", in order."""
+    items = [line for line in sections(text)["How far to trust this"] if re.match(r"\d+\. ", line)]
+    assert [int(line.split(".")[0]) for line in items] == list(range(1, len(items) + 1))
+    return [line.split(". ", 1)[1] for line in items]
+
+
+def marked(cell: str, word: str, text: str) -> str:
+    """The trust item a one-word marker in `cell` points to."""
+    found = {w: int(n) for w, n in MARKER.findall(cell)}
+    assert word in found, (word, cell)
+    return trust_items(text)[found[word] - 1]
+
+
+def test_whats_out_there_shows_grants_and_dollars_by_program_fy2021_to_the_last_ended_fy_with_fy2026_provisional(
+    project,
+):
+    write_actions(project.raw_usaspending, PULL, [
+        *grant("P047A220845", 2022, 5),  # Upward Bound, FY2022-FY2026
+        *grant("P044A210001", 2021, 6, amount=250_000),  # Talent Search, FY2021-FY2026
+        *grant("P042A200001", 2020, 2, amount=1_500_000),  # Student Support Services, FY2020 (before the window), FY2021
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    text = one_pager(project)
+    rows = {r["Program"]: r for r in table(text, "What's out there")}
+    header = list(next(iter(rows.values())))
+    assert header[1:6] == ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025"]
+    fy2026 = header[6]
+    assert fy2026.startswith("FY2026 [provisional")
+    assert "provisional" in marked(fy2026, "provisional", text)
+    assert "2026-10-07" in marked(fy2026, "provisional", text)
+    assert [rows["Upward Bound"][fy] for fy in ("FY2021", "FY2022", fy2026)] == ["-", "1 / $100K", "1 / $100K"]
+    assert [rows["Talent Search"][fy] for fy in ("FY2021", "FY2025")] == ["1 / $250K", "1 / $250K"]
+    assert [rows["Student Support Services"][fy] for fy in ("FY2021", "FY2022")] == ["1 / $1.5M", "-"]
+    assert rows["McNair"]["FY2024"] == "-"  # every Program is listed, funded or not
+    assert [rows["All Programs"][fy] for fy in ("FY2021", "FY2022")] == ["2 / $1.8M", "2 / $350K"]
+
+
+def test_once_fy2026_is_90_days_past_its_end_it_is_no_longer_provisional(project):
+    write_actions(project.raw_usaspending, "2026-12-29", grant("P047A220845", 2022, 5))
+
+    project.topo("run", "--as-of", "2026-12-29")
+
+    text = one_pager(project, "one_pager_2026-12-29.md")
+    header = list(table(text, "What's out there")[0])
+    assert header[-1] == "FY2026"
+    assert "provisional" not in prose(text, "How far to trust this")
