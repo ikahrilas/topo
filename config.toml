@@ -108,3 +108,12 @@ data_year = 2024
 # https://nces.ed.gov/programs/edge/Geographic/DistrictBoundaries before the first pull.
 postsecondary_geocodes_url = "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_POSTSECSCH_2526.zip"
 school_districts_url = "https://nces.ed.gov/programs/edge/data/EDGE_SCHOOLDISTRICT_TL25_SY2425.zip"
+
+[census_geocoder]
+# Fallback only: Campus districts for college Hosts with no EDGE campus point,
+# one single-record call each (`topo pull census_geocoder`, after a first run).
+# The vintage should match the EDGE district polygons (SY 2024-25 = ACS2025_Current).
+url = "https://geocoding.geo.census.gov/geocoder/geographies/address"
+benchmark = "Public_AR_Current"
+vintage = "ACS2025_Current"
+pause_seconds = 1.0

@@ -38,7 +38,7 @@ from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.match_quality_context import build_context_section, write_context_section_csv
 from topo.outputs.target_list import build_target_list, write_target_list_csv
-from topo.sources import SOURCES, ccd, ed_grantee_lists, edge, ipeds, saipe, usaspending
+from topo.sources import SOURCES, ccd, census_geocoder, ed_grantee_lists, edge, ipeds, saipe, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
@@ -177,7 +177,9 @@ def _join_local_context(config: Config, host_links: pl.DataFrame, pull_date: dt.
     colleges = host_links.filter(pl.col("host_kind") == UNITID)["host_id"].unique()
     points = edge.read_geocodes(config).filter(pl.col("unitid").is_in(colleges.implode()))
     polygons = config.layout.cleaned_table(edge.DISTRICTS_TABLE)
-    campus_districts = locate_campus_districts(points, polygons if polygons.exists() else None)
+    campus_districts = locate_campus_districts(
+        points, polygons if polygons.exists() else None, census_geocoder.read_campus_districts(config)
+    )
     context = build_local_context(
         host_links,
         ipeds_directory=ipeds.read_directory(config),
@@ -190,7 +192,7 @@ def _join_local_context(config: Config, host_links: pl.DataFrame, pull_date: dt.
         config.layout.cleaned_table(name)
         for name in (
             ipeds.DIRECTORY_TABLE, ipeds.ENROLLMENT_TABLE, ccd.LEA_DIRECTORY_TABLE, edge.GEOCODES_TABLE,
-            edge.DISTRICTS_TABLE, saipe.TABLE,
+            edge.DISTRICTS_TABLE, saipe.TABLE, census_geocoder.TABLE,
         )
     ]
     run_log.record(

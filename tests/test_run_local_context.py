@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import polars as pl
@@ -12,6 +13,9 @@ from support.geo import (
 )
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
 from support.usaspending import action, write_actions
+
+from topo.config import load_config
+from topo.sources import census_geocoder
 
 PULL = "2026-10-07"
 IHE = "PUBLIC/STATE CONTROLLED INSTITUTION OF HIGHER EDUCATION"
@@ -91,8 +95,8 @@ CONTEXT_COLUMNS = [
 ]
 
 
-def context(project) -> dict[str, dict[str, str]]:
-    rows = project.read_csv(f"target_list_{PULL}.csv")
+def context(project, version: str = "") -> dict[str, dict[str, str]]:
+    rows = project.read_csv(f"target_list_{PULL}{version}.csv")
     return {r["FAIN"]: {c: r[c] for c in CONTEXT_COLUMNS} for r in rows}
 
 
@@ -200,3 +204,49 @@ def test_without_any_context_source_every_matched_grant_says_why(project):
     assert rocky["Institution type"] == "Private nonprofit, 4-year or above"
     assert (rocky["Enrollment"], rocky["Poverty rate (ages 5-17)"]) == ("", "")
     assert rocky["Context reason"] == "no_enrollment_row|no_campus_district"
+
+
+def geocoder_reply(*districts: tuple[str, str, str]) -> dict:
+    """A Census geocoder `geographies/address` JSON reply naming (layer, GEOID, NAME) districts."""
+    geographies: dict[str, list] = {}
+    for layer, geoid, name in districts:
+        geographies.setdefault(layer, []).append({"GEOID": geoid, "NAME": name})
+    matches = [{"matchedAddress": "1511 POLY DR, BILLINGS, MT, 59102", "geographies": geographies}] if districts else []
+    return {"result": {"addressMatches": matches}}
+
+
+def test_the_census_geocoder_is_only_a_fallback_for_a_host_with_no_edge_point(project):
+    write_sources(project)
+    write_geocodes(project.root / "data" / "raw" / "edge" / PULL / GEOCODE_ZIP, [
+        geocode_row("104151", "Arizona State University Campus Immersion", "AZ", 33.42, -111.93),
+    ])
+    write_csv(project.root / "data" / "raw" / "ipeds" / PULL / "colleges_ipeds_directory.csv", DIRECTORY_COLUMNS, [
+        {**directory_row("180595", "Rocky Mountain College", "MT", ueis=("RMCUEI000001",), sector=2,
+                         city="BILLINGS", zip="59102"), "address": "1511 Poly Dr"},
+        directory_row("104151", "Arizona State University Campus Immersion", "AZ", ueis=("ASUUEI000001",)),
+    ])
+    project.topo("run", "--as-of", PULL)
+    assert context(project)["P042A250001"]["Context reason"] == "no_campus_district"
+
+    asked: list[str] = []
+
+    def get_json(url):
+        asked.append(url)
+        return geocoder_reply(("Unified School Districts", "3004380", "Billings Public Schools"))
+
+    pulled = census_geocoder.pull(
+        load_config(project.config), dt.date(2026, 10, 8), get_json=get_json, pause=lambda seconds: None
+    )
+    assert len(asked) == 1 and "street=1511+Poly+Dr" in asked[0] and "city=BILLINGS" in asked[0]
+    assert "vintage=ACS2025_Current" in asked[0]
+    assert pulled[0].source == "census_geocoder"
+    project.topo("run", "--as-of", PULL)
+
+    rocky = context(project, "_v2")["P042A250001"]
+    assert rocky["Poverty rate of"] == "Campus district: Billings Public Schools (LEAID 3004380)"
+    assert (rocky["Poverty rate (ages 5-17)"], rocky["Context reason"]) == ("0.15", "")
+    joined = pl.read_parquet(project.root / "data" / "joined" / "campus_districts.parquet")
+    assert joined.select("unitid", "leaid", "located_by").sort("unitid", "leaid").rows() == [
+        ("104151", "0408310", "edge_point"), ("104151", "0408340", "edge_point"),
+        ("180595", "3004380", "census_geocoder"),
+    ]
