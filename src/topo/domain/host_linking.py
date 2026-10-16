@@ -601,7 +601,9 @@ def _decide_college(
     # Only UEI and name: the address breaks the tie.
     if len(uei) == 1:
         pick = uei[0]
-        return (MATCHED if "address" in colleges[pick] else REVIEW), "uei_vs_name_conflict", pick
+        if "address" in colleges[pick]:
+            return MATCHED, "uei_vs_name_conflict_settled_by_address", pick
+        return REVIEW, "uei_vs_name_conflict", pick
     by_address = _with(colleges, {"address"})
     if len(by_address) == 1:
         return REVIEW, "system_campus_by_address", by_address[0]

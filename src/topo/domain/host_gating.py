@@ -159,7 +159,10 @@ def score_case_labels(rule_links: pl.DataFrame, answer_key: pl.DataFrame, gate: 
     per_label = (
         scored.group_by("case_label")
         .agg(
-            pl.col("outcome").first().alias("rule_outcome"),
+            # A label that decides any row automatically is gated as such (per row, below);
+            # each label should map to one outcome, but a mix must never slip past the gate.
+            pl.col("outcome").filter(pl.col("outcome").is_in(GATED_OUTCOMES)).first()
+            .fill_null(pl.col("outcome").first()).alias("rule_outcome"),
             pl.len().cast(pl.Int64).alias("links"),
             pl.col("key_host").is_not_null().sum().cast(pl.Int64).alias("checks"),
             (pl.col("key_host").is_not_null() & (pl.col("decision") == pl.col("key_host")).fill_null(False))
@@ -180,12 +183,14 @@ def score_case_labels(rule_links: pl.DataFrame, answer_key: pl.DataFrame, gate: 
 
 
 def gate_host_links(rule_links: pl.DataFrame, accuracy: pl.DataFrame) -> pl.DataFrame:
-    """Apply each Case label's gating: demoted labels go to review (their pick, if any, stays shown)."""
+    """Apply each Case label's gating per row: every auto-accepted row (matched or no single
+    Host) of a demoted label goes to review (its pick, if any, stays shown)."""
     # A label the accuracy table hasn't seen (on lookback Grants, say) has no checks: unverified.
     gated = rule_links.join(accuracy.select("case_label", "gating"), on="case_label", how="left").with_columns(
         pl.col("gating").fill_null(UNVERIFIED)
     )
-    outcome = pl.when(pl.col("gating") == DEMOTED).then(pl.lit(REVIEW)).otherwise(pl.col("outcome"))
+    demoted = (pl.col("gating") == DEMOTED) & pl.col("outcome").is_in(GATED_OUTCOMES)
+    outcome = pl.when(demoted).then(pl.lit(REVIEW)).otherwise(pl.col("outcome"))
     return gated.with_columns(
         pl.col("outcome").alias("rule_outcome"),
         pl.col("case_label").alias("rule_case_label"),

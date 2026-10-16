@@ -127,7 +127,7 @@ CASES = {
     ),
     "uei_vs_name_conflict_settled_by_address": (
         grant("P044A220022", "GEORGE CORLEY WALLACE STATE COMMUNITY COLLEGE", "AL", "WALLACEUEI01", city="SELMA"),
-        ("matched", "uei_vs_name_conflict", "UNITID", "101301"),
+        ("matched", "uei_vs_name_conflict_settled_by_address", "UNITID", "101301"),
     ),
     "system_campus_by_address": (
         grant("P042A220023", "REGENTS OF THE UNIVERSITY OF MINNESOTA", "MN", "UMNUEI000001", city="DULUTH"),
@@ -239,3 +239,15 @@ def test_a_merge_survivor_carries_the_signals():
     link = link_host(CASES["merged_unit_falls_back_to_the_same_state_survivor"][0], LOOKUPS)
     assert link.host_name == "Pennsylvania Western University"
     assert candidates(link) == {("482680", ("name", "uei"))}
+
+
+def test_each_case_label_maps_to_exactly_one_outcome():
+    # Gating scores a Case label as one stratum, so one label must never be both matched and review.
+    import test_host_linker as base
+
+    outcomes: dict[str, set[str]] = {}
+    for cases, lookups in ((CASES, LOOKUPS), (base.CASES, base.LOOKUPS)):
+        for facts, _ in cases.values():
+            link = link_host(facts, lookups)
+            outcomes.setdefault(link.case_label, set()).add(link.outcome)
+    assert {label: o for label, o in outcomes.items() if len(o) > 1} == {}

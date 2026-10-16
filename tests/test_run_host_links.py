@@ -140,6 +140,6 @@ def test_ed_list_text_descriptions_addresses_and_start_years_reach_the_linker(pr
     rows = by_fain(project.read_csv(f"target_list_{PULL}.csv"))
     assert {fain: (r["Host ID"], r["Host confidence"], r["Case label"]) for fain, r in rows.items()} == {
         "P047A250011": ("UNITID 109208", "matched", "ed_list_outranks_desc"),
-        "P042A250012": ("UNITID 101301", "matched", "uei_vs_name_conflict"),
+        "P042A250012": ("UNITID 101301", "matched", "uei_vs_name_conflict_settled_by_address"),
         "P042A250013": ("UNITID 482680", "matched", "uei_confirmed+followed_ipeds_merge"),
     }
