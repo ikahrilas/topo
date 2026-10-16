@@ -1,4 +1,4 @@
-"""The `topo` command line: pull <source>, clean <source>, join, report, run."""
+"""The `topo` command line: pull <source>, clean <source>, join, report, run, freeze, score-predictions."""
 
 from __future__ import annotations
 
@@ -121,3 +121,19 @@ def run(as_of: AsOf = None, allow_dirty: AllowDirty = False) -> None:
     delivered = _guarded(lambda: pipeline.run(_config(), _date(as_of)), allow_dirty)
     for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
         typer.echo(f"wrote {path}")
+
+
+@app.command()
+def freeze(allow_dirty: AllowDirty = False) -> None:
+    """Pre-register the FY2027 renewal-timing predictions from the joined layer (once; never overwritten)."""
+    path = _guarded(lambda: pipeline.freeze(_config()), allow_dirty)
+    typer.echo(f"wrote {path}")
+    typer.echo("Commit it with its provenance sidecar and tag the commit (e.g. `git tag fy2027-predictions`); "
+               "never edit it.")
+
+
+@app.command("score-predictions")
+def score_predictions(allow_dirty: AllowDirty = False) -> None:
+    """Score the frozen predictions against the joined layer; each scoring is a new file."""
+    path = _guarded(lambda: pipeline.score_predictions(_config()), allow_dirty)
+    typer.echo(f"wrote {path}")

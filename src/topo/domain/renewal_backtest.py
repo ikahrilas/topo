@@ -219,3 +219,93 @@ def run_backtest(
         pl.DataFrame(rows, schema=BACKTEST_SCHEMA),
         pl.DataFrame(grant_rows, schema=BACKTEST_GRANTS_SCHEMA, orient="row"),
     )
+
+
+FROZEN_SCHEMA = {
+    "program": pl.String, "competition_fy": pl.Int64, "cohort_fy": pl.Int64, "predicted_due_date": pl.Date,
+    "evidence_tier": pl.String, "timing": pl.String, "cohort_grants": pl.Int64, "flagged_grants": pl.Int64,
+    "flagged_fains": pl.String,
+}
+FAIN_SEPARATOR = ";"
+
+
+def freeze_predictions(
+    cohort_timing: pl.DataFrame,
+    grant_cohorts: pl.DataFrame,
+    renewal_timing: pl.DataFrame,
+    competition_fy: int,
+    cycle_months: int,
+) -> pl.DataFrame:
+    """Per TRIO Program, the Cohort due to compete in `competition_fy`: its prediction and flagged FAINs.
+
+    The Cohort is the one whose FY + the cycle is `competition_fy`; it is kept
+    even when its timing is "date unknown" or "timing not predicted", so what was
+    (not) predicted is pre-registered too. `renewal_timing` is the joined table
+    under the run's As-of date.
+    """
+    flagged = set(renewal_timing.filter(pl.col("re_competing_soon"))["fain"].to_list())
+    rows = []
+    for r in cohort_timing.filter(pl.col("program").is_in(TRIO_PROGRAMS)).sort("program").iter_rows(named=True):
+        if r["cohort_fy"] + cycle_months // 12 != competition_fy:
+            continue
+        members = grant_cohorts.filter(
+            (pl.col("program") == r["program"]) & (pl.col("cohort_fy") == r["cohort_fy"])
+        )["fain"].sort().to_list()
+        hits = [f for f in members if f in flagged]
+        rows.append(dict(program=r["program"], competition_fy=competition_fy, cohort_fy=r["cohort_fy"],
+                         predicted_due_date=r["predicted_due_date"], evidence_tier=r["evidence_tier"],
+                         timing=r["timing"], cohort_grants=len(members), flagged_grants=len(hits),
+                         flagged_fains=FAIN_SEPARATOR.join(hits)))
+    return pl.DataFrame(rows, schema=FROZEN_SCHEMA)
+
+
+SCORED_SCHEMA = {
+    "program": pl.String, "competition_fy": pl.Int64, "cohort_fy": pl.Int64, "predicted_due_date": pl.Date,
+    "evidence_tier": pl.String, "actual_deadline": pl.Date, "timing_error_months": pl.Int64, "grants": pl.Int64,
+    "re_competed": pl.Int64, "flagged": pl.Int64, "flagged_and_re_competed": pl.Int64, "recall": pl.Float64,
+    "precision": pl.Float64, "result": pl.String,
+}
+
+
+def score_frozen_predictions(
+    frozen: pl.DataFrame,
+    actions: pl.DataFrame,
+    deadlines: pl.DataFrame,
+    cohort_starts: pl.DataFrame,
+    grant_cohorts: pl.DataFrame,
+    bar: float,
+) -> pl.DataFrame:
+    """Score frozen predictions against the actual deadline and the new Cohort, as the backtest scores.
+
+    `frozen` is the frozen file as read (dates as ISO strings); the other tables
+    come from the current pull. A Program whose actual deadline or new Cohort
+    isn't known yet is "not scored". A slip (e.g. a DOL-driven delay) is a miss,
+    reported as one.
+    """
+    rows = []
+    for r in frozen.iter_rows(named=True):
+        program, fy = r["program"], int(r["competition_fy"])
+        predicted = dt.date.fromisoformat(r["predicted_due_date"]) if r["predicted_due_date"] else None
+        row = {c: None for c in SCORED_SCHEMA} | dict(
+            program=program, competition_fy=fy, cohort_fy=int(r["cohort_fy"]), predicted_due_date=predicted,
+            evidence_tier=r["evidence_tier"] or None,
+        )
+        rows.append(row)
+        actual = deadlines.filter((pl.col("program") == program) & (pl.col("competition_fy") == fy))
+        new_start = cohort_starts.filter((pl.col("program") == program) & (pl.col("cohort_fy") == fy))
+        if actual.is_empty():
+            row["result"] = NO_DEADLINE
+            continue
+        row["actual_deadline"] = actual["application_deadline"][0]
+        if predicted is not None:
+            row["timing_error_months"] = months_between(row["actual_deadline"], predicted)
+        members = grant_cohorts.filter(
+            (pl.col("program") == program) & (pl.col("cohort_fy") == row["cohort_fy"])
+        )["fain"].sort().to_list()
+        row["grants"] = len(members)
+        if new_start.is_empty():
+            row["result"] = NO_NEW_COHORT
+            continue
+        flagged = {f for f in (r["flagged_fains"] or "").split(FAIN_SEPARATOR) if f}
+        row.update(score_flags(flagged, re_competed_fains(actions, members, new_start["cohort_start"][0]), bar))
+    return pl.DataFrame(rows, schema=SCORED_SCHEMA)

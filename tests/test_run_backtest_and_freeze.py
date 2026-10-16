@@ -120,6 +120,87 @@ def test_a_program_with_a_competition_cohort_but_no_deadline_is_not_scored(proje
     assert rows["Upward Bound"]["Result"] == "pass"
 
 
+def read_rows(path):
+    with path.open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def test_run_never_writes_the_frozen_predictions(project):
+    write_deadlines(project, UB_2017, UB_2022)
+    write_actions(project.raw_usaspending, PULL, [*UB_2017_COHORT, *UB_2022_COHORT])
+
+    project.topo("run", "--as-of", PULL)
+
+    assert not (project.root / FROZEN).exists()
+
+
+def test_freeze_writes_the_fy2027_predictions_once_and_refuses_to_overwrite(project):
+    write_deadlines(project, UB_2017, UB_2022)
+    write_actions(project.raw_usaspending, PULL, [
+        *UB_2017_COHORT, *grant("P047A220001", 2022, 5), *grant("P047A220002", 2022, 3),  # 002 unfunded
+    ])
+    project.topo("run", "--as-of", PULL)
+
+    project.topo("freeze")
+
+    frozen = project.root / FROZEN
+    [ub] = read_rows(frozen)
+    assert {k: ub[k] for k in ("program", "competition_fy", "cohort_fy", "predicted_due_date", "evidence_tier",
+                               "timing", "flagged_fains", "as_of", "pull_date")} == {
+        "program": "Upward Bound", "competition_fy": "2027", "cohort_fy": "2022",
+        "predicted_due_date": "2027-01-31", "evidence_tier": "inferred", "timing": "predicted",
+        "flagged_fains": "P047A220001", "as_of": PULL, "pull_date": PULL,
+    }
+    assert ub["rule_version"]
+    assert "source_commit" in ub
+    assert frozen.with_name(frozen.name + ".provenance.json").exists()
+
+    before = frozen.read_bytes()
+    result = project.topo("freeze", expect_exit=2)
+    assert "already frozen" in result.output
+    assert frozen.read_bytes() == before
+
+
+def test_scoring_the_frozen_predictions_writes_a_new_file_and_leaves_the_frozen_one_alone(project):
+    write_deadlines(project, UB_2017, UB_2022)
+    write_actions(project.raw_usaspending, PULL, [*UB_2017_COHORT, *UB_2022_COHORT])
+    project.topo("run", "--as-of", PULL)
+    project.topo("freeze")
+    frozen = project.root / FROZEN
+    before = frozen.read_bytes()
+
+    # A later pull: the FY2027 notice is out, and the new Cohort's FAINs have appeared.
+    later = "2027-10-07"
+    write_deadlines(project, UB_2017, UB_2022, "Upward Bound,2027,2027-02-28,FY2027 NIA,,\n")
+    write_actions(project.raw_usaspending, later, [
+        *UB_2017_COHORT, *UB_2022_COHORT,
+        *grant("P047A270001", 2027, 1), *grant("P047A270002", 2027, 1),
+    ])
+    project.topo("run", "--as-of", later)
+    project.topo("score-predictions")
+
+    assert frozen.read_bytes() == before
+    scored = project.root / f"data/curated/fy2027_predictions_scored_{later}.csv"
+    [ub] = read_rows(scored)
+    assert {k: ub[k] for k in ("program", "predicted_due_date", "actual_deadline", "timing_error_months",
+                               "grants", "re_competed", "flagged", "recall", "precision", "result")} == {
+        "program": "Upward Bound", "predicted_due_date": "2027-01-31", "actual_deadline": "2027-02-28",
+        "timing_error_months": "-1", "grants": "2", "re_competed": "2", "flagged": "2",
+        "recall": "1.0", "precision": "1.0", "result": "pass",
+    }
+    project.topo("score-predictions", expect_exit=2)  # a second scoring on the same As-of date never overwrites
+
+
+def test_scoring_without_a_frozen_file_stops(project):
+    write_deadlines(project, UB_2017, UB_2022)
+    write_actions(project.raw_usaspending, PULL, [*UB_2017_COHORT, *UB_2022_COHORT])
+    project.topo("run", "--as-of", PULL)
+
+    result = project.topo("score-predictions", expect_exit=2)
+
+    assert "no frozen predictions" in result.output
+
+
 def test_the_report_shows_the_observed_gap_table_per_program(project):
     write_deadlines(project, UB_2017, UB_2022)
     write_actions(project.raw_usaspending, PULL, [
