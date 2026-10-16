@@ -23,7 +23,16 @@ from topo.domain.host_linking import HostLookups, build_host_links
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
-from topo.outputs.target_list import build_target_list, write_target_list_csv
+from topo.domain.cause_notes import FILE_NAME as CAUSE_NOTES_FILE
+from topo.domain.cause_notes import read_cause_notes
+from topo.outputs.target_list import (
+    ReadmeFacts,
+    TargetListSettings,
+    awaited_notes,
+    build_target_list,
+    provisional_fiscal_years,
+    write_target_list,
+)
 from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
@@ -168,13 +177,20 @@ def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
 @dataclass(frozen=True)
 class Delivered:
     target_list_csv: Path
+    target_list_xlsx: Path
 
 
 def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
-    rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
+    funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
+    cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
+    settings = TargetListSettings.from_section(config.section("target_list"))
+    rows = build_target_list(
+        universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
+        cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
+    )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
@@ -183,9 +199,18 @@ def report(config: Config) -> Delivered:
             for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
         ),
     )
-    path = write_target_list_csv(rows, config.layout.output, context.pull_date)
-    provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
-    return Delivered(target_list_csv=path)
+    readme = ReadmeFacts(
+        pull_date=context.pull_date,
+        as_of=context.as_of,
+        window=context.window,
+        settings=settings,
+        provisional=provisional_fiscal_years(context.window, context.pull_date, settings.provisional_lag_days),
+        awaited=awaited_notes(universe, settings),
+    )
+    files = write_target_list(rows, readme, config.layout.output)
+    for path in (files.xlsx, files.csv):
+        provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
+    return Delivered(target_list_csv=files.csv, target_list_xlsx=files.xlsx)
 
 
 def run(config: Config, as_of: dt.date | None = None) -> Delivered:

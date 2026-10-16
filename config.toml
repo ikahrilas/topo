@@ -69,3 +69,17 @@ TRIO = 5
 # the shell or in a .env file beside this one; .env is git-ignored. Only the
 # Census API takes a key.
 census = "CENSUS_API_KEY"
+
+[target_list]
+# Priority tier 1: new Grants within this many months of their award (#26).
+new_award_months = 3
+# A fiscal year less than this many days past its end on the Pull date is labelled
+# "provisional (as of <Pull date>; reporting lag)".
+provisional_lag_days = 90
+# Competitions awarded but whose new FAINs (`<FAIN prefix><yy>`, e.g. P044A26) are
+# not yet in USAspending. Each Program's rows carry "<FY> new awards not yet
+# reported" until one such FAIN appears. Source: docs/research/apr-data-and-fy2026-awards.md (Q2).
+awaited_cohorts = [
+    { program = "Talent Search", fy = 2026 },
+    { program = "Educational Opportunity Centers", fy = 2026 },
+]
