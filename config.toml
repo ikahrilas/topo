@@ -167,3 +167,10 @@ cycle_months = 60
 # ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
 lead_months = 12
 deadline_table = "deadlines.csv"
+
+[spot_check]
+# Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
+# (data/curated/review_findings.csv). ASSUMPTION: the founder checks 2–3 states.
+min_states = 2
+max_states = 3
+note_max_chars = 100
