@@ -15,14 +15,18 @@ from pathlib import Path
 import polars as pl
 
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
+from topo.domain.funding_status import ReadWindows, read_grants_funding_status
 from topo.domain.grant_universe import GrantUniverse, build_grant_universe
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak
+from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.target_list import build_target_list, write_target_list_csv
 from topo.sources import SOURCES, usaspending
 
 RUN_CONTEXT = "run_context.json"
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
+FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
+GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
 
 
 @dataclass(frozen=True)
@@ -81,8 +85,19 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
+    _join_funding_status(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
+
+
+def _join_funding_status(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Read Funding status under the As-of date, write it to the joined layer, append the history."""
+    periods, per_grant = read_grants_funding_status(
+        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of
+    )
+    periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
+    per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
+    append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
@@ -109,7 +124,8 @@ class Delivered:
 
 def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
-    rows = build_target_list(universe, context.as_of)
+    funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
+    rows = build_target_list(universe, context.as_of, funding)
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
     return Delivered(target_list_csv=path)
 

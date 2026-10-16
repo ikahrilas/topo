@@ -34,6 +34,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import pandera.polars as pa
+import polars as pl
+
+from topo.guards import check_schema
+
 CONTINUED = "continued"
 FUNDED_LATE = "funded late"
 UNFUNDED = "unfunded"
@@ -288,3 +293,93 @@ def _lifecycle_stage(chain: list[tuple[dt.date, dt.date]], as_of: dt.date) -> st
     if as_of >= chain[-1][0]:
         return FINAL_BUDGET_PERIOD
     return CONTINUING
+
+
+# --- Frame-level reading for the joined layer -------------------------------------------
+
+
+class BudgetPeriodFundingStatus(pa.DataFrameModel):
+    """Funding status grain: one row per (FAIN, Budget period)."""
+
+    fain: str
+    budget_period_start: dt.date
+    budget_period_end: dt.date
+    funding_status: str = pa.Field(isin=[CONTINUED, FUNDED_LATE, UNFUNDED, REVERSED, NOT_YET_READABLE])
+    readable_from: dt.date = pa.Field(nullable=True)
+    disrupted: bool
+
+    class Config:
+        strict = True
+        unique = ["fain", "budget_period_start"]
+
+
+class GrantFundingStatus(pa.DataFrameModel):
+    """One row per FAIN: the reading shown on the target list."""
+
+    fain: str = pa.Field(unique=True)
+    funding_status: str = pa.Field(nullable=True)
+    readable_from: dt.date = pa.Field(nullable=True)
+    latest_readable_status: str = pa.Field(nullable=True)
+    disruption: str = pa.Field(isin=[DISRUPTION_NO, DISRUPTION_YES, DISRUPTION_RESTORED])
+    lifecycle_stage: str = pa.Field(nullable=True)
+
+    class Config:
+        strict = True
+
+
+def read_grants_funding_status(
+    grants: pl.DataFrame, grant_actions: pl.DataFrame, windows: ReadWindows, as_of: dt.date
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Read every Grant: (one row per FAIN and Budget period, one row per FAIN).
+
+    Until Succession links exist (#39), the Succession exclusion is fed every
+    A1 on another FAIN in the Grant universe; the reader matches same day and
+    same amount.
+    """
+    a1s = [
+        OtherA1(fain, day, amount)
+        for fain, day, amount in grant_actions.filter(pl.col("action_type") == "A1")
+        .select("fain", "action_date", "obligation")
+        .iter_rows()
+    ]
+    actions_by_fain: dict[str, list[FundingAction]] = {}
+    for row in grant_actions.iter_rows(named=True):
+        actions_by_fain.setdefault(row["fain"], []).append(
+            FundingAction(
+                action_date=row["action_date"],
+                obligation=row["obligation"],
+                action_type=row["action_type"],
+                budget_period_start=row["budget_period_start"],
+                budget_period_end=row["budget_period_end"],
+            )
+        )
+    period_rows, grant_rows = [], []
+    for fain, family in grants.select("fain", "program_family").iter_rows():
+        reading = read_funding_status(
+            actions_by_fain.get(fain, []),
+            windows,
+            as_of,
+            other_fain_a1s=[a for a in a1s if a.fain != fain],
+            expected_budget_periods=windows.expected_budget_periods(family),
+        )
+        period_rows += [(fain, p.start, p.end, p.status, p.readable_from, p.disrupted) for p in reading.periods]
+        grant_rows.append(
+            (fain, reading.funding_status, reading.readable_from, reading.latest_readable_status,
+             reading.disruption, reading.lifecycle_stage)
+        )
+    periods = pl.DataFrame(
+        period_rows,
+        schema={"fain": pl.String, "budget_period_start": pl.Date, "budget_period_end": pl.Date,
+                "funding_status": pl.String, "readable_from": pl.Date, "disrupted": pl.Boolean},
+        orient="row",
+    )
+    per_grant = pl.DataFrame(
+        grant_rows,
+        schema={"fain": pl.String, "funding_status": pl.String, "readable_from": pl.Date,
+                "latest_readable_status": pl.String, "disruption": pl.String, "lifecycle_stage": pl.String},
+        orient="row",
+    )
+    return (
+        check_schema(BudgetPeriodFundingStatus, periods, "Funding status"),
+        check_schema(GrantFundingStatus, per_grant, "Grant Funding status"),
+    )
