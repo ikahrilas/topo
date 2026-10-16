@@ -554,6 +554,7 @@ def report(config: Config) -> Delivered:
     )
     queue_path = write_review_queue_csv(queue, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, queue_path, as_of=context.as_of, pull_date=context.pull_date)
+    answer_key = curated.read_answer_key(config)
     quality = render_match_quality(
         MatchQualityInputs(
             pull_date=context.pull_date,
@@ -564,7 +565,8 @@ def report(config: Config) -> Delivered:
             candidates=candidates,
             accuracy=pl.read_parquet(config.layout.joined_table(CASE_LABEL_ACCURACY)),
             gate=Gate.from_section(config.section("host_linking")),
-            answer_key_rows=curated.read_answer_key(config).height,
+            answer_key_rows=answer_key.height,
+            answer_key=answer_key,
             tuning_set_rows=curated.read_tuning_set(config).height,
             input_hashes=_input_hashes(config),
             cohort_timing=pl.read_parquet(config.layout.joined_table(COHORT_TIMING)),

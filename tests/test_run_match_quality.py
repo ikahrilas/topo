@@ -17,7 +17,7 @@ from pathlib import Path
 
 from support.curated import key_row, override_row, write_answer_key, write_overrides, write_tuning_set
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
-from support.markdown import table
+from support.markdown import prose, table
 from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
@@ -328,3 +328,43 @@ def test_a_malformed_answer_key_host_is_a_structural_break(project):
     write_answer_key(project.root, [key_row("P044A250011", "Rocky Mountain College")])
 
     project.topo("run", "--as-of", PULL, expect_exit=2)
+
+
+def test_double_labelled_rows_report_inter_rater_agreement_and_accuracy_scores_the_primary_label(project):
+    setup(project)
+    key = {r["fain"]: r for r in gating_key()}
+    seconds = {
+        COLLEGE_FAINS[0]: f"UNITID {unitid(1)}",  # agrees
+        COLLEGE_FAINS[1]: "UNITID 999999",  # disagrees
+        NONPROFIT_FAINS[0]: "no single Host",  # agrees
+        COLLEGE_FAINS[9]: f"UNITID {unitid(10)}",  # disagrees; would make the rule right if it were scored
+    }
+    for fain, second in seconds.items():
+        key[fain] |= {"second_host": second, "second_reviewer": "second labeller"}
+    write_answer_key(project.root, key.values())
+
+    project.topo("run", "--as-of", PULL)
+
+    got = accuracy(project)["uei_confirmed"]
+    assert (got["Checks"], got["Correct"]) == ("10", "9")  # primary label only
+    text = (project.output / REPORT).read_text()
+    assert "4 answer-key rows are labelled twice; the two labels agree on 2 (50.0%)." in prose(
+        text, "Inter-rater agreement")
+    disagreements = table(text, "Inter-rater agreement")
+    assert [(r["FAIN"], r["Host"], r["Second host"]) for r in disagreements] == [
+        (COLLEGE_FAINS[1], f"UNITID {unitid(2)}", "UNITID 999999"),
+        (COLLEGE_FAINS[9], "UNITID 999999", f"UNITID {unitid(10)}"),
+    ]
+
+
+def test_an_answer_key_without_the_second_label_columns_still_reads(project):
+    setup(project)
+    path = project.root / "data" / "curated" / "host_answer_key.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text(f"fain,host,reviewer,labelled_on,note\n{COLLEGE_FAINS[0]},UNITID {unitid(1)},owner,2026-09-01,\n")
+
+    project.topo("run", "--as-of", PULL)
+
+    assert accuracy(project)["uei_confirmed"]["Checks"] == "1"
+    assert "No answer-key row is labelled twice yet." in prose(
+        (project.output / REPORT).read_text(), "Inter-rater agreement")

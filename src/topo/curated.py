@@ -2,8 +2,11 @@
 
 Host-linking files (ADR 0002), all CSV, each checked against its schema on read:
 
-    host_answer_key.csv   the FROZEN answer key: fain, host, reviewer, labelled_on, note.
-                          Scored for Case-label gating only; never tuned against.
+    host_answer_key.csv   the FROZEN answer key: fain, host, reviewer, labelled_on, note,
+                          second_host, second_reviewer. Scored for Case-label gating only,
+                          on `host` (the primary label); never tuned against. About 40 rows
+                          are labelled twice: `second_host` feeds only inter-rater agreement.
+                          A file without the two second-label columns still reads.
                           `[host_linking] answer_key_sha256` pins its bytes once labelled.
     host_tuning_set.csv   the separate, growing tuning set (same columns). Never scored for
                           gating; a FAIN in both files stops the run.
@@ -27,6 +30,8 @@ from topo.config import Config
 from topo.domain.host_gating import HostAnswerKey, HostOverrides
 from topo.guards import StructuralBreak, check_schema
 
+# Columns a curated file may lack (older headers): read as blank.
+OPTIONAL_COLUMNS = ("second_host", "second_reviewer")
 ANSWER_KEY = "host_answer_key.csv"
 TUNING_SET = "host_tuning_set.csv"
 OVERRIDES = "host_overrides.csv"
@@ -41,6 +46,9 @@ def _read(path: Path, model: type[pa.DataFrameModel], label: str) -> pl.DataFram
     if not path.exists():
         return pl.DataFrame(schema={c: pl.String for c in columns})
     frame = pl.read_csv(path, infer_schema=False)
+    frame = frame.with_columns(
+        pl.lit(None, dtype=pl.String).alias(c) for c in columns if c in OPTIONAL_COLUMNS and c not in frame.columns
+    )
     missing = [c for c in columns if c not in frame.columns]
     if missing:
         raise StructuralBreak(f"{label} ({path.name}) lacks columns: {', '.join(missing)}")

@@ -1,7 +1,7 @@
 """The match-quality report on Host linking (Markdown), delivered as output/match_quality_<Pull date>.md.
 
 Sections: outcome split by count and dollars; accuracy per Case label with its
-sample size and gating; overrides in force; review and unmatched lists by FAIN;
+sample size and gating; inter-rater agreement on double-labelled answer-key rows; overrides in force; review and unmatched lists by FAIN;
 Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
 with no UEI; breakdowns by Program, by start year and by Host-link flag; Pull date, As-of date and
 input hashes. Dollars are obligations over the reporting-window fiscal years.
@@ -51,6 +51,7 @@ class MatchQualityInputs:
     backtest_bar: float = 0.95
     local_context: pl.DataFrame | None = None  # joined local_context (topo.domain.local_context.LocalContext)
     founder_spot_check: pl.DataFrame | None = None  # topo.review_findings.spot_check_summary
+    answer_key: pl.DataFrame | None = None  # HostAnswerKey: double-labelled rows give inter-rater agreement
 
 
 def _money(value: float | None) -> str:
@@ -124,6 +125,8 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
             for r in inputs.accuracy.iter_rows(named=True)
         ],
     )
+
+    out += _inter_rater_agreement(inputs.answer_key)
 
     overridden = links.filter(pl.col("gating") == "override").sort("fain")
     out += ["", "## Overrides", "", f"{overridden.height} Host links decided by a reviewer's override.", ""]
@@ -250,6 +253,29 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
     out += ["", "## Inputs", ""]
     out += _table(["Input", "SHA-256"], [[path, sha] for path, sha in inputs.input_hashes])
     return "\n".join(out) + "\n"
+
+
+def _inter_rater_agreement(answer_key: pl.DataFrame | None) -> list[str]:
+    """Agreement between the two labels of double-labelled answer-key rows; disagreements by FAIN."""
+    out = ["", "## Inter-rater agreement", ""]
+    twice = (
+        answer_key.filter(pl.col("second_host").is_not_null()).sort("fain")
+        if answer_key is not None and "second_host" in answer_key.columns else None
+    )
+    if twice is None or not twice.height:
+        return [*out, "No answer-key row is labelled twice yet."]
+    disagree = twice.filter(pl.col("host") != pl.col("second_host"))
+    agree = twice.height - disagree.height
+    out += [
+        f"{twice.height} answer-key rows are labelled twice; the two labels agree on {agree} "
+        f"({_pct(agree, twice.height)}). Accuracy above scores the primary label only.",
+        "",
+    ]
+    return out + _table(
+        ["FAIN", "Host", "Reviewer", "Second host", "Second reviewer"],
+        [[r["fain"], r["host"], r["reviewer"], r["second_host"], r["second_reviewer"]]
+         for r in disagree.iter_rows(named=True)],
+    )
 
 
 def _share(value: float | None) -> str:

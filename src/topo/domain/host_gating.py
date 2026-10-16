@@ -75,16 +75,26 @@ class Gate:
 
 
 class HostAnswerKey(pa.DataFrameModel):
-    """The frozen answer key, or the separate tuning set (same format): one true Host per FAIN."""
+    """The frozen answer key, or the separate tuning set (same format): one true Host per FAIN.
+
+    `host` is the primary label, the only one scored. A double-labelled row also carries a
+    second reviewer's `second_host`, read only to report inter-rater agreement.
+    """
 
     fain: str = pa.Field(unique=True)
     host: str = pa.Field(str_matches=HOST_VALUE.pattern)
     reviewer: str
     labelled_on: str = pa.Field(str_matches=r"^\d{4}-\d{2}-\d{2}$")
     note: str = pa.Field(nullable=True)
+    second_host: str = pa.Field(nullable=True, str_matches=HOST_VALUE.pattern)
+    second_reviewer: str = pa.Field(nullable=True)
 
     class Config:
         strict = True
+
+    @pa.dataframe_check
+    def second_label_names_its_reviewer(cls, data) -> pl.LazyFrame:
+        return data.lazyframe.select(pl.col("second_host").is_null() | pl.col("second_reviewer").is_not_null())
 
 
 class HostOverrides(pa.DataFrameModel):
