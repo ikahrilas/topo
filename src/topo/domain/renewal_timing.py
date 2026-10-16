@@ -16,8 +16,10 @@ rule isn't forced on it).
 **Re-competing soon** is set for a TRIO Grant when its Cohort's Predicted due
 date is at most `lead_months` (12, ASSUMPTION) after the As-of date, its latest
 readable Funding status is continued or funded late, and no newer Cohort's
-FAINs have appeared (an A1 dated on or before the As-of date). It holds past
-the date itself until those FAINs appear.
+FAINs have appeared: a new award (a FAIN's first A1) on the Program, dated on
+or before the As-of date, in or after the predicted competition FY. It holds
+past the date itself until those FAINs appear. New awards are read from every
+cleaned action, since a new Cohort's Grants may start after the reporting window.
 
 GEAR UP competes most years, so it gets no prediction: its rows say "competes
 most years; timing not predicted" and carry an "expires within 12 months" fact
@@ -42,7 +44,8 @@ import pandera.polars as pa
 import polars as pl
 
 from topo.domain.funding_status import FUNDED, add_months
-from topo.domain.programs import GEAR_UP, PROGRAMS, TRIO
+from topo.domain.programs import GEAR_UP, PROGRAMS, TRIO, program_for
+from topo.fiscal import fiscal_year
 from topo.guards import check_schema
 
 # Renewal timing values (the "Renewal timing" column).
@@ -205,12 +208,33 @@ def predict_cohort_timing(
     return check_schema(CohortTiming, frame.sort("program", "cohort_fy"), "Cohort timing")
 
 
+def new_award_fys(actions: pl.DataFrame, as_of: dt.date) -> dict[str, set[int]]:
+    """Program -> the FYs of its new awards (each FAIN's first A1) dated on or before the As-of date.
+
+    `actions` are cleaned USAspending actions (any FAIN, in the window or not).
+    """
+    first = (
+        actions.filter(pl.col("action_type") == "A1")
+        .sort("action_date")
+        .group_by("fain", maintain_order=True)
+        .agg(pl.col("listing").first(), pl.col("action_date").first())
+        .filter(pl.col("action_date") <= as_of)
+    )
+    fys: dict[str, set[int]] = {}
+    for fain, listing, date in first.iter_rows():
+        program = program_for(listing, fain)
+        if program is not None:
+            fys.setdefault(program.name, set()).add(fiscal_year(date))
+    return fys
+
+
 def read_renewal_timing(
     grants: pl.DataFrame,
     grant_actions: pl.DataFrame,
     grant_cohorts: pl.DataFrame,
     cohort_timing: pl.DataFrame,
     funding: pl.DataFrame,
+    new_awards: dict[str, set[int]],
     as_of: dt.date,
     settings: RenewalSettings,
     expected_budget_periods: dict[str, int],
@@ -219,15 +243,11 @@ def read_renewal_timing(
 
     `grant_cohorts` covers in-window and lookback FAINs (topo.domain.succession);
     `funding` is the joined grant_funding_status table; `grant_actions` are the
-    in-window Grants' actions (newer Cohorts' A1s are read from them).
+    in-window Grants' actions; `new_awards` comes from `new_award_fys`.
     """
     cohorts = dict(grant_cohorts.select("fain", "cohort_fy").iter_rows())
     timing = {(r["program"], r["cohort_fy"]): r for r in cohort_timing.iter_rows(named=True)}
     readable = dict(funding.select("fain", "latest_readable_status").iter_rows())
-    a1s = grant_actions.filter((pl.col("action_type") == "A1") & (pl.col("action_date") <= as_of))
-    appeared = {  # (Program, Cohort FY) whose FAINs have appeared by the As-of date
-        (p, cohorts.get(f)) for f, p in a1s.select("fain", "program").unique().iter_rows() if cohorts.get(f) is not None
-    }
     horizon = add_months(as_of, settings.lead_months)
 
     rows = []
@@ -249,7 +269,8 @@ def read_renewal_timing(
                        predicted_due_date=cohort["predicted_due_date"],
                        evidence_tier=cohort["evidence_tier"], timing=cohort["timing"])
             due = cohort["predicted_due_date"]
-            newer = any(p == g["program"] and c > fy for p, c in appeared)
+            next_fy = cohort["predicted_competition_fy"]
+            newer = next_fy is not None and any(f >= next_fy for f in new_awards.get(g["program"], ()))
             row["re_competing_soon"] = bool(
                 due is not None and due <= horizon and readable.get(g["fain"]) in FUNDED and not newer
             )
