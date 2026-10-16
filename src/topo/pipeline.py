@@ -26,7 +26,7 @@ from topo.domain.grant_universe import (
     build_lookback,
 )
 from topo.domain.host_gating import Gate, apply_overrides, check_separate, gate_and_override, gate_host_links
-from topo.domain.host_linking import UNITID, HostLookups, build_host_links
+from topo.domain.host_linking import LEAID, UNITID, HostLookups, build_host_links
 from topo.domain.succession import (
     LookbackSettings,
     build_successions,
@@ -40,7 +40,7 @@ from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
 from topo.outputs.target_list import build_target_list, write_target_list_csv
-from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
+from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
@@ -122,7 +122,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
-    lookups = HostLookups.from_directory(ipeds.read_directory(config))
+    lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
     host_links, after_rules = _join_host_links(config, universe, actions, lookups)
     successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
     _join_funding_status(config, universe, context, successors)
@@ -143,7 +143,10 @@ def _join_host_links(
     answer_key = curated.read_answer_key(config)
     check_separate(answer_key, curated.read_tuning_set(config))
     overrides = curated.read_overrides(config)
-    host_names = {(UNITID, uid): unit.name for uid, unit in lookups.units.items()}
+    host_names = {
+        **{(UNITID, uid): unit.name for uid, unit in lookups.units.items()},
+        **{(LEAID, leaid): district.name for leaid, district in lookups.districts.items()},
+    }
     links, accuracy = gate_and_override(
         rule_links, answer_key, overrides, Gate.from_section(config.section("host_linking")), host_names
     )
