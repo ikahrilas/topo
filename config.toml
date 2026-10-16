@@ -1,0 +1,32 @@
+# topo configuration (ADR 0003): the one place for tolerances, read windows,
+# thresholds, the reporting window and the As-of default. Values are fixed
+# before the first run and never tuned to close a gap. Paths are relative to
+# this file. Later tickets add their own sections here.
+
+[paths]
+data = "data"      # data/raw (pulled), data/cleaned, data/joined, data/curated (committed)
+output = "output"  # delivered files; never overwritten
+
+[as_of]
+# "latest_usaspending_pull" (the date of the newest data/raw/usaspending/<Pull date>/
+# directory) or a fixed date such as "2026-10-07". Never the system clock.
+default = "latest_usaspending_pull"
+
+[reporting_window]
+# First federal fiscal year of the reporting window. The window ends at the last
+# fiscal year that has ended on the As-of date, so it rolls forward on its own.
+start_fy = 2021
+
+[tolerances]
+# Reconciliation (#14): within 1% or $1M, whichever is larger.
+reconciliation_relative = 0.01
+reconciliation_absolute_usd = 1_000_000
+
+[usaspending]
+# Award Data Archive fiscal years fetched by `topo pull usaspending`
+# (reporting window plus lookback), through the fiscal year of the Pull date.
+pull_from_fy = 2015
+# Per-agency archives to fetch. Grants are never selected by agency; this only
+# says which archive files are downloaded. `bulk_agency_id` is USAspending's
+# id for list_monthly_files (ED = 80).
+archive_agencies = [{ toptier_code = "091", bulk_agency_id = 80 }]
