@@ -77,7 +77,7 @@ CASES = {
     ),
     "single_weak_signal_name": (
         grant("P042A200002", "GEORGE CORLEY WALLACE STATE COMMUNITY COLLEGE", "AL", None),
-        ("review", "single_weak_signal:name", "UNITID", "101295"),
+        ("review", "single_weak_signal:name+no_uei", "UNITID", "101295"),
     ),
     "gearup_state": (
         grant("P334S140007", "PENNSYLVANIA STATE SYSTEM OF HIGHER EDUCATION", "PA", "PASSHEUEI001", STATE_GOV),
