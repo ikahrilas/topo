@@ -11,6 +11,8 @@ The fixture population, by the rule that decides each Grant:
 
 from __future__ import annotations
 
+import hashlib
+
 from support.curated import key_row, override_row, write_answer_key, write_overrides, write_tuning_set
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
 from support.markdown import table
@@ -241,6 +243,65 @@ def test_review_queue_lists_candidates_with_signals_by_dollars_and_succession_im
     }
     wisconsin = next(r for r in queue if r["FAIN"] == "P042A250023")
     assert wisconsin["Succession impact"] == "2"
+
+
+REPORT_GRANTS = [
+    *GRANTS,
+    # uei_only: the UEI points at College Number 1, the name matches nothing.
+    one_year("P047A250030", "BOARD OF TRUSTEES MT TECH", "MTUEI0000001", "MT", IHE, amount=100000),
+    # Awarded before UEIs, still active on the As-of date, no UEI on any action.
+    action("P042A210031", 1, "2021-07-01", 50000, ("2021-09-01", "2022-08-31"), action_type="A1",
+           recipient="NO UEI COLLEGE", uei="", state="MT", business_types_description=IHE),
+    action("P042A210031", 2, "2026-07-01", 50000, ("2026-09-01", "2027-08-31"),
+           recipient="NO UEI COLLEGE", uei="", state="MT", business_types_description=IHE),
+    # Also pre-2022 with no UEI, but ended: not counted as still active.
+    action("P042A200032", 1, "2020-07-01", 40000, ("2020-09-01", "2021-08-31"), action_type="A1",
+           recipient="ENDED NO UEI COLLEGE", uei="", state="MT", business_types_description=IHE),
+]
+
+
+def test_match_quality_report_shows_linking_quality(project):
+    setup(project, REPORT_GRANTS)
+
+    project.topo("run", "--as-of", PULL)
+
+    text = (project.output / REPORT).read_text()
+    assert f"Pull date: {PULL}" in text
+    split = {r["Outcome"]: (r["Grants"], r["Dollars"]) for r in table(text, "Outcome split")}
+    assert split == {
+        "matched": ("11", "$3,100,000"),
+        "no_single_host": ("11", "$3,300,000"),
+        "review": ("2", "$1,100,000"),
+        "unmatched": ("3", "$400,000"),
+    }
+    assert table(text, "Outcome split")[0]["Share of Grants"] == "40.7%"
+
+    assert [r["FAIN"] for r in table(text, "Review list")] == ["P042A250022", "P042A250023"]
+    assert [r["FAIN"] for r in table(text, "Unmatched list")] == ["P042A200032", "P042A210031", "P042A250024"]
+
+    no_uei_link = {(r["Recipient"], r["Recipient UEI"]) for r in table(text, "Recipients with no UEI link")}
+    assert ("OKLAHOMA COLLEGE", "OKUEI0000001") in no_uei_link
+    assert ("NO UEI COLLEGE", "none") in no_uei_link
+    assert ("HELPING HANDS 11", "NPUEI0000011") in no_uei_link
+    assert not {r for r in no_uei_link if r[0] in ("COLLEGE NUMBER 1", "REGENTS OF THE UNIVERSITY OF MINNESOTA")}
+    assert len(no_uei_link) == 14
+
+    assert table(text, "UEI error exposure") == [{"Case label": "uei_only", "Grants": "1", "Dollars": "$100,000"}]
+    assert [r["FAIN"] for r in table(text, "Still-active pre-2022 Grants with no UEI")] == ["P042A210031"]
+
+    programs = by(table(text, "By Program"), "Program")
+    assert {k: programs["Student Support Services"][k] for k in ("matched", "review", "unmatched", "Grants")} == {
+        "matched": "10", "review": "2", "unmatched": "3", "Grants": "15",
+    }
+    assert programs["Talent Search"]["no_single_host"] == "10"
+    years = by(table(text, "By start year"), "Start FY")
+    assert {y: r["Grants"] for y, r in years.items()} == {"2020": "1", "2021": "1", "2025": "25"}
+
+    inputs = by(table(text, "Inputs"), "Input")
+    assert inputs["config.toml"]["SHA-256"] == hashlib.sha256(project.config.read_bytes()).hexdigest()
+    directory = f"data/raw/ipeds/{PULL}/colleges_ipeds_directory.csv"
+    assert inputs[directory]["SHA-256"] == hashlib.sha256((project.root / directory).read_bytes()).hexdigest()
+    assert any(path.startswith(f"data/raw/usaspending/{PULL}/") for path in inputs)
 
 
 def test_a_malformed_answer_key_host_is_a_structural_break(project):
