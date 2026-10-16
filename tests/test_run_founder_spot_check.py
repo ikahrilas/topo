@@ -211,6 +211,38 @@ def test_ingest_refuses_a_mark_or_field_outside_the_lists_and_an_over_long_note(
     assert not (project.root / FINDINGS).exists() or findings(project) == []
 
 
+def test_later_target_lists_show_the_last_founder_mark_by_fain_read_only(project):
+    setup(project)
+    project.topo("run", "--as-of", PULL)
+    project.topo("ingest-findings", str(returned(project, {
+        "P042A250004": ("wrong", "Host institution", "Runs at the Twin Cities campus"),
+        "P042A250005": ("ok", None, None),
+    })), "--date", "2026-10-20")
+    project.topo("ingest-findings", str(mark(project.output / SPOT_CHECK, project.root / "second.xlsx", {
+        "P042A250005": ("stale", "Recipient", "Renamed in 2025"),
+    })), "--date", "2026-11-02")
+
+    project.topo("report")
+
+    later = project.output / f"target_list_{PULL}_v2.xlsx"
+    shown = {fain: r["Last founder mark"] for fain, r in by_fain(read_sheet(later, "Target list")).items()}
+    assert shown == {
+        "P042A250001": "",
+        "P042A250002": "",
+        "P047A250003": "",
+        "P042A250004": "wrong (Host institution) on 2026-10-20: Runs at the Twin Cities campus",
+        "P042A250005": "stale (Recipient) on 2026-11-02: Renamed in 2025",
+    }
+    csv_rows = by_fain(project.read_csv(f"target_list_{PULL}_v2.csv"))
+    assert csv_rows["P042A250005"]["Last founder mark"] == "stale (Recipient) on 2026-11-02: Renamed in 2025"
+    copy = load_workbook(project.output / f"spot_check_{PULL}_v2.xlsx")["Target list"]
+    header = [c.value for c in copy[1]]
+    column = header.index("Last founder mark") + 1
+    cells = [copy.cell(row=r, column=column) for r in range(2, copy.max_row + 1)]
+    assert "wrong (Host institution) on 2026-10-20: Runs at the Twin Cities campus" in {c.value for c in cells}
+    assert all(c.protection.locked for c in cells)
+
+
 def test_findings_never_change_the_overrides_file(project):
     setup(project)
     overrides = write_overrides(project.root, [override_row("P042A250001", "UNITID 900001")])

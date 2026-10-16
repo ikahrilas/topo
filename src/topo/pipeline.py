@@ -49,6 +49,7 @@ from topo.outputs.target_list import (
 )
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
+from topo.review_findings import last_founder_marks, read_review_findings
 from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
 from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
@@ -301,10 +302,12 @@ def report(config: Config) -> Delivered:
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
     cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
+    findings = read_review_findings(config)
     settings = TargetListSettings.from_section(config.section("target_list"))
     rows = build_target_list(
         universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
         cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
+        founder_marks=last_founder_marks(findings),
     )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
