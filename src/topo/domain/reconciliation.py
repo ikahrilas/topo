@@ -134,11 +134,30 @@ class ReconciliationInputs:
     allocations: pl.DataFrame  # curated_totals.ProgramAllocations
     grants: pl.DataFrame  # joined Grants (fain, program, ...)
     grant_actions: pl.DataFrame  # joined GrantActions
+    ed_trio_list_rows: pl.DataFrame  # cleaned EdTrioListRows (amounts are used only here)
+    ed_gearup_list_rows: pl.DataFrame  # cleaned EdGearUpListRows (new awards)
+    ed_list_coverage: pl.DataFrame  # cleaned EdListCoverage: filed or missing per (Program, FY)
+
+
+class EdListFainDifferences(pa.DataFrameModel):
+    """TRIO ED-list rows that disagree with USAspending, by FAIN (action-date FY; neither side corrected)."""
+
+    program: str
+    fiscal_year: int
+    fain: str
+    kind: str = pa.Field(isin=[ED_LIST_ONLY, USASPENDING_ONLY, AMOUNT_DIFFERENCE])
+    ed_amount: float = pa.Field(nullable=True)
+    usaspending_amount: float = pa.Field(nullable=True)  # action-date FY
+    budget_period_amount: float = pa.Field(nullable=True)  # Budget-period-start FY
+
+    class Config:
+        strict = True
 
 
 @dataclass(frozen=True)
 class ReconciliationResult:
     table: pl.DataFrame
+    ed_list_fain_differences: pl.DataFrame
 
 
 def _money(value: float | None) -> str:
@@ -306,10 +325,90 @@ def _ed_allocations_vs_usaspending(
     return rows
 
 
+def _list_coverage(inputs: ReconciliationInputs, program: str, fy: int) -> tuple[bool, str]:
+    """(filed, note): whether an ED grantee list is filed for the Program and FY."""
+    rows = inputs.ed_list_coverage.filter((pl.col("program") == program) & (pl.col("fiscal_year") == fy))
+    filed = rows.filter(pl.col("status") == ED_LIST_FILED)
+    if filed.height:
+        return True, "; ".join(f"ED list {f} filed {d}" for f, d in filed.select("raw_file", "filed_date").iter_rows())
+    notes = [n for n in rows["note"].to_list() if n]
+    return False, "; ".join([f"{fy_label(fy)}: no ED grantee list", *notes] if notes else [
+        f"{fy_label(fy)}: no ED grantee list filed in the raw manifest"])
+
+
+def _fain_differences(trio: pl.DataFrame, by_fain: pl.DataFrame, program: str, fy: int) -> pl.DataFrame:
+    on_list = trio.select("fain", "ed_amount")
+    funded = by_fain.filter((pl.col("program") == program) & (pl.col("fiscal_year") == fy))
+    in_usaspending = funded.filter(pl.col("basis") == ACTION_DATE).select(
+        "fain", pl.col("obligation").round(2).alias("usaspending_amount")
+    ).filter(pl.col("usaspending_amount") != 0)
+    by_period = funded.filter(pl.col("basis") == BUDGET_PERIOD).select(
+        "fain", pl.col("obligation").round(2).alias("budget_period_amount")
+    )
+    both = on_list.join(in_usaspending, on="fain", how="full", coalesce=True).join(by_period, on="fain", how="left")
+    return (
+        both.with_columns(
+            pl.when(pl.col("usaspending_amount").is_null()).then(pl.lit(ED_LIST_ONLY))
+            .when(pl.col("ed_amount").is_null()).then(pl.lit(USASPENDING_ONLY))
+            .when(pl.col("ed_amount").round(2) != pl.col("usaspending_amount")).then(pl.lit(AMOUNT_DIFFERENCE))
+            .otherwise(None).alias("kind"),
+            pl.lit(program).alias("program"),
+            pl.lit(fy, dtype=pl.Int64).alias("fiscal_year"),
+        )
+        .filter(pl.col("kind").is_not_null())
+        .select(list(EdListFainDifferences.to_schema().columns))
+    )
+
+
+def _ed_lists_vs_usaspending(
+    inputs: ReconciliationInputs, tolerances: Tolerances, by_fain: pl.DataFrame
+) -> tuple[list[dict], list[pl.DataFrame]]:
+    """(c) ED grantee lists vs USAspending, exactly: TRIO every Grant by FAIN, GEAR UP new awards."""
+    rows, differences = [], []
+    new_awards = _usaspending_by_fy(inputs, inputs.grant_actions.filter(pl.col("action_type") == "A1"))
+    for program in TRIO_PROGRAMS + GEAR_UP_PROGRAMS:
+        trio = program in TRIO_PROGRAMS
+        totals = by_fain if trio else new_awards
+        compared_source = "USAspending obligations" if trio else "USAspending new awards (A1)"
+        for fy in inputs.window.fiscal_years:
+            dollars, count = _totals(totals, program, fy, ACTION_DATE)
+            variant_dollars, variant_count = _totals(totals, program, fy, BUDGET_PERIOD)
+            provisional = _provisional(inputs, fy, tolerances)
+            filed, note = _list_coverage(inputs, program, fy)
+            unavailable = None if filed else (NO_ED_LIST, note)
+            listed = (inputs.ed_trio_list_rows if trio else inputs.ed_gearup_list_rows).filter(
+                (pl.col("program") == program) & (pl.col("fiscal_year") == fy)
+            )
+            citations = [note]
+            if filed and trio:
+                found = _fain_differences(listed, by_fain, program, fy)
+                differences.append(found)
+                tally = {kind: found.filter(pl.col("kind") == kind).height
+                         for kind in (ED_LIST_ONLY, USASPENDING_ONLY, AMOUNT_DIFFERENCE)}
+                citations.append(
+                    f"{tally[ED_LIST_ONLY]} on ED list only, {tally[USASPENDING_ONLY]} in USAspending only, "
+                    f"{tally[AMOUNT_DIFFERENCE]} amount differences"
+                )
+            reference = round(float(listed["ed_amount"].sum()), 2) if filed else None
+            rows.append(_compare(
+                ED_LIST_DOLLARS, program, fy, "ED grantee list", compared_source, reference, dollars,
+                variant_dollars, 0.0, provisional, citations, unavailable,
+            ))
+            rows.append(_compare(
+                ED_LIST_COUNT, program, fy, "ED grantee list", compared_source,
+                float(listed.height) if filed else None, float(count), float(variant_count), 0.0, provisional,
+                citations, unavailable,
+            ))
+    return rows, differences
+
+
 def build_reconciliation(inputs: ReconciliationInputs, tolerances: Tolerances) -> ReconciliationResult:
     """Every check for every Program and reporting-window FY. A duplicate key stops the run."""
     by_fain = _usaspending_by_fy(inputs, inputs.grant_actions)
-    records = _appropriation_vs_allocations(inputs) + _ed_allocations_vs_usaspending(inputs, tolerances, by_fain)
+    list_rows, differences = _ed_lists_vs_usaspending(inputs, tolerances, by_fain)
+    records = (
+        _appropriation_vs_allocations(inputs) + _ed_allocations_vs_usaspending(inputs, tolerances, by_fain) + list_rows
+    )
     columns = Reconciliation.to_schema().columns
     dtypes = {name: col.dtype.type for name, col in columns.items()}
     table = pl.DataFrame(records, schema=dtypes).select(list(columns)).sort("check", "program", "fiscal_year")
@@ -320,4 +419,9 @@ def build_reconciliation(inputs: ReconciliationInputs, tolerances: Tolerances) -
     if unlabelled.height:
         raise StructuralBreak(f"{unlabelled.height} reconciliation rows differ without a Gap reason code")
     table = check_schema(Reconciliation, table, "reconciliation table")
-    return ReconciliationResult(table=table)
+    fain_differences = pl.concat(
+        [pl.DataFrame(schema={n: c.dtype.type for n, c in EdListFainDifferences.to_schema().columns.items()}),
+         *differences]
+    ).sort("program", "fiscal_year", "fain")
+    fain_differences = check_schema(EdListFainDifferences, fain_differences, "ED list FAIN differences")
+    return ReconciliationResult(table=table, ed_list_fain_differences=fain_differences)

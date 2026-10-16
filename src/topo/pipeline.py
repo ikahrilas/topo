@@ -42,6 +42,7 @@ HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its sign
 FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
 GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
 RECONCILIATION = "reconciliation"  # one row per (check, Program, FY)
+ED_LIST_FAIN_DIFFERENCES = "ed_list_fain_differences"  # TRIO ED-list rows that disagree with USAspending, by FAIN
 
 
 @dataclass(frozen=True)
@@ -200,6 +201,9 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         allocations=curated_totals.read_allocations(config),
         grants=universe.grants,
         grant_actions=universe.grant_actions,
+        ed_trio_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
+        ed_gearup_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.GEARUP_TABLE),
+        ed_list_coverage=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
     )
     result = build_reconciliation(inputs, Tolerances.from_config(config))
     table = result.table
@@ -212,6 +216,7 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         )
         warn(f"{misses.height} reconciliation rows do not reconcile ({named})")
     table.write_parquet(config.layout.joined_table(RECONCILIATION))
+    result.ed_list_fain_differences.write_parquet(config.layout.joined_table(ED_LIST_FAIN_DIFFERENCES))
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:

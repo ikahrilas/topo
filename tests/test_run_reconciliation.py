@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import polars as pl
 from conftest import REPO_ROOT
-from support.curated import ALLOCATION_COLUMNS, APPROPRIATION_COLUMNS, research_figures, write_curated
+from support.curated import ALLOCATION_COLUMNS, APPROPRIATION_COLUMNS, allocation, research_figures, write_curated
+from support.ed_lists import file_list, gearup_html_bytes, known_gap, pdf_bytes, trio_pdf_lines, write_manifest
 from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
@@ -60,6 +62,120 @@ def test_empty_or_absent_curated_files_run_and_every_outside_figure_reads_not_pu
                                              "ed_allocation_count"}
     assert {(r["Reconciliation status"], r["Gap reason code"]) for r in outside} == {("not comparable", "not_published")}
     assert all(r["Note"] for r in table)
+
+
+MCNAIR_EARLY = [  # FY2023 Budget period funded by an action dated in FY2024: a timing difference
+    action("P217A220001", 1, "2022-07-01", 2_000_000, ("2022-09-01", "2023-08-31"), action_type="A1"),
+    action("P217A220001", 2, "2023-10-05", 3_000_000, ("2023-09-01", "2024-08-31")),
+]
+
+
+def allocations_case(project):
+    write_actions(project.raw_usaspending, PULL, MCNAIR_EARLY + grant("P044A210001", 2021, 6, amount=250_000))
+    write_curated(project.root, [], [
+        allocation("McNair", 2022, 2_400_000),  # within $1M of 2,000,000
+        allocation("McNair", 2023, 3_000_000),  # action-date FY2023 has 0; Budget-period FY2023 has 3,000,000
+        allocation("Talent Search", 2024, 5_000_000),  # 250,000 in USAspending
+        allocation("Talent Search", 2025, None, count=1),  # FY2025: counts only
+        allocation("Talent Search", 2026, None, count=2),  # FY2026 ended 7 days before the Pull date
+    ])
+
+
+def test_ed_allocations_reconcile_within_1_percent_or_1m_and_years_passing_only_by_budget_period_are_timing(project):
+    allocations_case(project)
+
+    project.topo("run", "--as-of", PULL)
+
+    dollars, counts = rows(project, "ed_allocation_dollars"), rows(project, "ed_allocation_count")
+    shown = {key: (r["Reconciliation status"], r["Gap reason code"]) for key, r in dollars.items()}
+    assert shown[("McNair", "FY2022")] == ("reconciled", "")
+    assert shown[("McNair", "FY2023")] == ("stated difference", "timing_difference")
+    assert (dollars[("McNair", "FY2023")]["Compared value"], dollars[("McNair", "FY2023")]["Budget-period value"]) == (
+        "0.00", "3000000.00")
+    assert shown[("Talent Search", "FY2024")] == ("stated difference", "unexplained")
+    assert shown[("Talent Search", "FY2025")] == ("not comparable", "not_published")
+    assert shown[("McNair", "FY2021")] == ("not comparable", "not_published")  # nothing filed
+    assert (counts[("Talent Search", "FY2025")]["Reconciliation status"],
+            counts[("Talent Search", "FY2025")]["Compared value"]) == ("reconciled", "1.00")
+    assert (counts[("Talent Search", "FY2026")]["Reconciliation status"],
+            counts[("Talent Search", "FY2026")]["Gap reason code"]) == ("stated difference", "provisional")
+    assert dollars[("McNair", "FY2022")]["Tolerance"] == "1000000.00"
+
+
+def test_tolerances_come_from_config(project):
+    allocations_case(project)
+    project.set_config("reconciliation_absolute_usd = 1_000_000", "reconciliation_absolute_usd = 0")
+
+    project.topo("run", "--as-of", PULL)
+
+    mcnair = rows(project, "ed_allocation_dollars")[("McNair", "FY2022")]
+    assert (mcnair["Reconciliation status"], mcnair["Gap reason code"], mcnair["Tolerance"]) == (
+        "stated difference", "unexplained", "24000.00")
+
+
+LISTS_CASE = grant("P047A221553", 2022, 4) + grant("P047A220187", 2022, 4, amount=362_438)
+
+
+def ed_lists_case(project):
+    write_actions(project.raw_usaspending, PULL, LISTS_CASE + [
+        action("P334A250001", 1, "2025-09-20", 2_190_400, ("2025-09-26", "2026-09-25"), action_type="A1"),
+        action("P334A250002", 1, "2025-10-02", 1_852_798, ("2025-09-26", "2026-09-25"), action_type="A1"),
+    ])
+    lists = project.root / "data" / "raw" / "ed_grantee_lists"
+    write_manifest(lists, [
+        file_list(lists, "ub_84047A", "2024", "ub2024.pdf", pdf_bytes(trio_pdf_lines(2024, "Upward Bound", [
+            ("P047A221553", "University of Alaska/ Anchorage", "AK", 60, 100_000),
+            ("P047A220187", "Alabama State University/ Montgomery", "AL", 67, 362_438),
+        ]))),
+        file_list(lists, "ub_84047A", "2025", "ub2025.pdf", pdf_bytes(trio_pdf_lines(2025, "Upward Bound", [
+            ("P047A221553", "University of Alaska/ Anchorage", "AK", 60, 100_000),
+            ("P047A220187", "Alabama State University/ Montgomery", "AL", 67, 362_000),  # $438 apart
+            ("P047A229999", "Never Funded College/ North", "AK", 75, 300_000),  # not in USAspending
+        ]))),
+        known_gap("ub_84047A", "2023", "known gap: no FY2023 list on ed.gov"),
+        file_list(lists, "gearup_partnership_84334A", "2025", "awards.html", gearup_html_bytes({
+            2025: [("Washington State University", "WA", "2,738", "$2,190,400"),
+                   ("Utah State University", "UT", "2,316", "$1,852,798")],
+        })),
+    ])
+
+
+def test_ed_lists_are_compared_exactly_and_missing_program_years_are_no_ed_list(project):
+    ed_lists_case(project)
+
+    project.topo("run", "--as-of", PULL)
+
+    dollars, counts = rows(project, "ed_list_dollars"), rows(project, "ed_list_count")
+    shown = {key: (r["Reconciliation status"], r["Gap reason code"]) for key, r in dollars.items()}
+    assert shown[("Upward Bound", "FY2024")] == ("reconciled", "")
+    assert shown[("Upward Bound", "FY2025")] == ("stated difference", "unexplained")
+    assert (dollars[("Upward Bound", "FY2025")]["Reference value"], dollars[("Upward Bound", "FY2025")]["Compared value"]) == (
+        "762000.00", "462438.00")
+    assert "1 on ED list only" in dollars[("Upward Bound", "FY2025")]["Note"]
+    assert "1 amount differences" in dollars[("Upward Bound", "FY2025")]["Note"]
+    assert shown[("Upward Bound", "FY2023")] == ("not comparable", "no_ed_list")
+    assert "known gap: no FY2023 list on ed.gov" in dollars[("Upward Bound", "FY2023")]["Note"]
+    assert shown[("McNair", "FY2024")] == ("not comparable", "no_ed_list")  # no list filed at all
+    assert counts[("Upward Bound", "FY2025")]["Reconciliation status"] == "stated difference"
+    # GEAR UP: count and sum of new awards; the second A1 is dated in FY2026 for a Budget period starting in FY2025
+    gear_up = dollars[("GEAR UP partnership", "FY2025")]
+    assert (gear_up["Reconciliation status"], gear_up["Gap reason code"]) == ("stated difference", "timing_difference")
+    assert (gear_up["Reference value"], gear_up["Compared value"], gear_up["Budget-period value"]) == (
+        "4043198.00", "2190400.00", "4043198.00")
+    assert counts[("GEAR UP partnership", "FY2025")]["Gap reason code"] == "timing_difference"
+
+
+def test_ed_list_differences_are_kept_by_fain(project):
+    ed_lists_case(project)
+
+    project.topo("run", "--as-of", PULL)
+
+    differences = pl.read_parquet(project.root / "data" / "joined" / "ed_list_fain_differences.parquet")
+    assert differences.sort("fain").select("program", "fiscal_year", "fain", "kind", "ed_amount",
+                                           "usaspending_amount").rows() == [
+        ("Upward Bound", 2025, "P047A220187", "amount_difference", 362_000.0, 362_438.0),
+        ("Upward Bound", 2025, "P047A229999", "ed_list_only", 300_000.0, None),
+    ]
 
 
 def test_the_committed_curated_files_have_their_schema_headers():
