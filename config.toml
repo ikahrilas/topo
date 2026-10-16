@@ -26,9 +26,8 @@ reconciliation_absolute_usd = 1_000_000
 reconciliation_count_relative = 0.01
 
 [reconciliation]
-# A fiscal year that ended fewer than this many days before the Pull date and
-# does not reconcile is `provisional`, not failed (#14: FY2026 until 2026-12-29).
-provisional_after_days = 90
+# A fiscal year less than [target_list] provisional_lag_days past its end on the
+# Pull date that does not reconcile is `provisional`, not failed (#14).
 # ASSUMPTION (#14): ED-list evidence for unfunded Budget periods (on an ED list
 # with funding, no USAspending action) is "large" at 5% or more overall, or over
 # 10% in any Program x FY; the one-pager must then say unfunded status partly
@@ -39,7 +38,7 @@ evidence_large_share_program_fy = 0.10
 [usaspending]
 # Award Data Archive fiscal years fetched by `topo pull usaspending`
 # (reporting window plus lookback), through the fiscal year of the Pull date.
-pull_from_fy = 2015
+pull_from_fy = 2010  # the TRIO lookback horizon ([lookback] trio_from_fy)
 # Per-agency archives to fetch. Grants are never selected by agency; this only
 # says which archive files are downloaded. `bulk_agency_id` is USAspending's
 # id for list_monthly_files (ED = 80).
@@ -78,8 +77,54 @@ disruption_window_end = 2026-09-30
 TRIO = 5
 "GEAR UP" = 6
 
+[host_linking]
+# Case-label gating on the frozen answer key (ADR 0002). A label that decides
+# automatically is auto-accepted at >= auto_accept_accuracy with at least
+# auto_accept_min_checks checks, demoted to review below the bar, and reported
+# "unverified" (its rule outcome kept) under the minimum. ASSUMPTION: 95% / 10.
+auto_accept_accuracy = 0.95
+auto_accept_min_checks = 10
+# Once the answer key in data/curated/host_answer_key.csv is labelled, pin its
+# sha256 here; any later edit to the frozen key then stops the run. "" = not pinned.
+answer_key_sha256 = ""
+
 [api_keys]
 # Environment variables holding API keys (never the keys themselves). Set them in
 # the shell or in a .env file beside this one; .env is git-ignored. Only the
 # Census API takes a key.
 census = "CENSUS_API_KEY"
+
+[target_list]
+# Priority tier 1: new Grants within this many months of their award (#26).
+new_award_months = 3
+# A fiscal year less than this many days past its end on the Pull date is labelled
+# "provisional (as of <Pull date>; reporting lag)".
+provisional_lag_days = 90
+# Competitions awarded but whose new FAINs (`<FAIN prefix><yy>`, e.g. P044A26) are
+# not yet in USAspending. Each Program's rows carry "<FY> new awards not yet
+# reported" until one such FAIN appears. Source: docs/research/apr-data-and-fy2026-awards.md (Q2).
+awaited_cohorts = [
+    { program = "Talent Search", fy = 2026 },
+    { program = "Educational Opportunity Centers", fy = 2026 },
+]
+
+[lookback]
+# Lookback (#39): Grants whose project period ended before the reporting window
+# are read back to these fiscal years, only for Succession links and Cohort
+# starts. They never get amount columns or reconciliation rows.
+trio_from_fy = 2010
+gear_up_from_fy = 2015
+# An FY is a Cohort start for a Program when its new awards (A1s) number at least
+# this share of the Program's largest yearly count. ASSUMPTION.
+cohort_min_share = 0.5
+
+[ccd]
+# Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
+# fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.
+lea_directory_url = "https://educationdata.urban.org/csv/ccd/school-districts_lea_directory.csv"
+# District years kept: names since 2015 cover renamed districts.
+directory_from_year = 2015
+# CCD agency types kept as possible district Hosts: 1 regular, 2 component of a
+# supervisory union, 4 regional education service agency, 5 state agency,
+# 7 independent charter agency (the host-linking prototype's set).
+agency_types = [1, 2, 4, 5, 7]

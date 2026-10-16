@@ -6,6 +6,7 @@ import datetime as dt
 
 import polars as pl
 from support.usaspending import action, write_actions
+from support.workbook import read_sheet
 
 PULL = "2026-10-07"
 HISTORY = "funding_status_history.parquet"
@@ -50,8 +51,10 @@ SIENA_TO_ADRIAN = [  # Succession: the old FAIN's negative matches the new FAIN'
 ]
 
 
-def target_rows(project, name=f"target_list_{PULL}.csv") -> dict[str, dict[str, str]]:
-    return {r["FAIN"]: r for r in project.read_csv(name)}
+def target_rows(project, name=f"target_list_{PULL}.xlsx") -> dict[str, dict[str, str]]:
+    """Rows of the main and Ended sheets (ended Grants live on the Ended sheet)."""
+    path = project.output / name
+    return {r["FAIN"]: r for r in read_sheet(path, "Target list") + read_sheet(path, "Ended")}
 
 
 def test_target_list_shows_funding_status_lifecycle_stage_and_disruption(project):

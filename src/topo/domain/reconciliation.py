@@ -20,7 +20,7 @@ Checks:
 
 FY basis: the action-date FY is primary. The Budget-period variant labels each
 action by the FY its Budget period starts in; a row that passes only on the
-variant is `timing_difference`. A year that ended less than `provisional_after_days`
+variant is `timing_difference`. A year that ended less than `provisional_lag_days`
 before the Pull date and does not reconcile is `provisional`, not failed.
 """
 
@@ -86,7 +86,7 @@ class Tolerances:
     relative: float  # (b): share of the reference value
     absolute_usd: float  # (b) dollars: the floor, whichever is larger
     count_relative: float  # (b) counts
-    provisional_after_days: int  # a year ended fewer days than this before the Pull date is provisional
+    provisional_lag_days: int  # a year ended fewer days than this before the Pull date is provisional
     evidence_large_share_overall: float  # ED-list evidence for unfunded Budget periods is "large" at or above
     evidence_large_share_program_fy: float  # ... or above this in any Program x FY
 
@@ -98,7 +98,7 @@ class Tolerances:
             relative=float(tolerances["reconciliation_relative"]),
             absolute_usd=float(tolerances["reconciliation_absolute_usd"]),
             count_relative=float(tolerances["reconciliation_count_relative"]),
-            provisional_after_days=int(section["provisional_after_days"]),
+            provisional_lag_days=int(config.section("target_list")["provisional_lag_days"]),  # the one 90-day lag
             evidence_large_share_overall=float(section["evidence_large_share_overall"]),
             evidence_large_share_program_fy=float(section["evidence_large_share_program_fy"]),
         )
@@ -279,7 +279,7 @@ def _totals(by_fain: pl.DataFrame, program: str, fy: int, basis: str) -> tuple[f
 
 
 def _provisional(inputs: ReconciliationInputs, fy: int, tolerances: Tolerances) -> bool:
-    return (inputs.pull_date - fy_end(fy)).days < tolerances.provisional_after_days
+    return (inputs.pull_date - fy_end(fy)).days < tolerances.provisional_lag_days
 
 
 def _judge(

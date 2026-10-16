@@ -33,7 +33,7 @@ def read_manifest(project) -> list[dict[str, str]]:
 
 def fake_usaspending_http(monkeypatch, project):
     """`topo pull usaspending` without the network: one Full archive for FY2027."""
-    project.set_config("pull_from_fy = 2015", "pull_from_fy = 2027")
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
 
     def post_json(url, body):
         name = f"FY{body['fiscal_year']}_091_Assistance_Full_20261006.zip"

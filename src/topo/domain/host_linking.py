@@ -14,9 +14,11 @@ and the Case label names the rule that decided it. No numeric score.
 Rules in this module (#32): Recipient UEI -> IPEDS `ueis` and Recipient name ->
 IPEDS names (every name since `directory_from_year`, plus `inst_alias`), both
 restricted to the Recipient's state; IPEDS system offices (sector 0) never beat
-a real campus; the No single Host rules. Later tickets add the ED list name,
-award-description phrases, campus words, address tiebreaks, IPEDS merges
-(#35) and districts from CCD (#36). Case labels follow the prototype taxonomy
+a real campus; the No single Host rules. GEAR UP partnerships (#36) link only
+to districts (CCD LEAIDs) named by the Recipient itself or the award
+descriptions, never to the college partner. Later tickets add the ED list
+name, award-description phrases for colleges, campus words, address
+tiebreaks and IPEDS merges (#35). Case labels follow the prototype taxonomy
 (prototypes/host-linking/README.md).
 """
 
@@ -131,6 +133,66 @@ def _split(values: str | None) -> list[str]:
     return [v.strip() for v in (values or "").split("|") if v.strip()]
 
 
+# District name forms (host-linking prototype): a district is named by its core
+# name plus any of these forms ("SOCORRO ISD", "OGDEN CITY SCHOOL DISTRICT").
+_LEA_SUFFIX = re.compile(
+    r"\b(INDEPENDENT SCHOOL DISTRICT|UNIFIED SCHOOL DISTRICT|CONSOLIDATED SCHOOL DISTRICT|SCHOOL DISTRICT|"
+    r"PUBLIC SCHOOLS|CITY SCHOOLS|COUNTY SCHOOLS|SCHOOLS|SCHOOL CORPORATION|DISTRICT|ISD|USD|CISD|CSD|SD)"
+    r"( NO \d+| \d+)?$"
+)
+_LEA_PREFIX = re.compile(r"^(BOARD OF EDUCATION OF (THE )?|SCHOOL DISTRICT OF (THE )?|SCHOOL BOARD OF )")
+_LEA_TAIL = re.compile(r" (BOARD OF EDUCATION|SCHOOL BOARD|CITY SCHOOL BOARD|COUNTY SCHOOL BOARD)$")
+_LEA_PLACE_WORD = re.compile(r" (CITY|COUNTY|AREA|COMMUNITY|PUBLIC|MUNICIPAL|UNIFIED|JOINT|CONSOLIDATED)$")
+LEA_FORMS = (
+    "SCHOOL DISTRICT", "SCHOOLS", "PUBLIC SCHOOLS", "INDEPENDENT SCHOOL DISTRICT", "ISD", "UNIFIED SCHOOL DISTRICT",
+    "USD", "CITY SCHOOLS", "CITY SCHOOL DISTRICT", "COUNTY SCHOOLS", "COUNTY SCHOOL DISTRICT", "SCHOOL CORPORATION",
+    "COMMUNITY SCHOOLS", "AREA SCHOOL DISTRICT", "SCHOOL BOARD", "BOARD OF EDUCATION",
+)
+
+
+def lea_core(name: str | None) -> str:
+    """A district's core name: 'BOARD OF EDUCATION OF OGDEN CITY' -> 'OGDEN', 'Socorro ISD' -> 'SOCORRO'."""
+    s = _norm(name).replace("METRO ", "METROPOLITAN ")
+    s = _LEA_PREFIX.sub("", s)
+    s = _LEA_TAIL.sub("", s)
+    s = _LEA_SUFFIX.sub("", s).strip()
+    return _LEA_PLACE_WORD.sub("", s).strip()
+
+
+def _phrase(text: str) -> tuple[str, ...]:
+    return tuple(name_key(text).split())
+
+
+@dataclass(frozen=True)
+class District:
+    leaid: str
+    name: str  # latest name
+    state: str | None
+    phrases: frozenset[tuple[str, ...]]  # name-key token phrases that name it (two tokens or more)
+    cores: frozenset[str]  # core names, for a Recipient that is the district itself
+
+
+def _districts(lea_directory: pl.DataFrame) -> dict[str, District]:
+    latest: dict[str, dict] = {}
+    names: dict[str, set[str]] = defaultdict(set)
+    for r in lea_directory.sort("leaid", "year").iter_rows(named=True):
+        latest[r["leaid"]] = r
+        names[r["leaid"]].add(r["lea_name"])
+    districts = {}
+    for leaid, r in latest.items():
+        phrases: set[tuple[str, ...]] = set()
+        cores = {lea_core(n) for n in names[leaid]} - {""}
+        for n in names[leaid]:
+            phrases.add(_phrase(n))
+        for core in cores:
+            phrases |= {_phrase(f"{core} {form}") for form in LEA_FORMS}
+        districts[leaid] = District(
+            leaid, r["lea_name"], r["state_location"],
+            frozenset(p for p in phrases if len(p) >= 2), frozenset(cores),
+        )
+    return districts
+
+
 @dataclass(frozen=True)
 class HostLookups:
     """Lookup tables the linker reads, indexed by state so no signal crosses a state line."""
@@ -138,10 +200,14 @@ class HostLookups:
     units: dict[str, IpedsUnit]
     _by_uei: dict[tuple[str, str], frozenset[str]] = field(repr=False)
     _by_name: dict[tuple[str, str], frozenset[str]] = field(repr=False)
+    districts: dict[str, District] = field(default_factory=dict)
+    _district_by_phrase: dict[tuple[str, tuple[str, ...]], frozenset[str]] = field(default_factory=dict, repr=False)
+    _district_by_core: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_directory(cls, directory: pl.DataFrame) -> "HostLookups":
-        """Build from the cleaned IPEDS directory history (topo.sources.ipeds)."""
+    def from_directory(cls, directory: pl.DataFrame, lea_directory: pl.DataFrame | None = None) -> "HostLookups":
+        """Build from the cleaned IPEDS directory history (topo.sources.ipeds) and, for
+        district Hosts, the cleaned CCD LEA directory history (topo.sources.ccd)."""
         rows = directory.sort("unitid", "year").iter_rows(named=True)
         latest: dict[str, dict] = {}
         names: dict[str, set[str]] = defaultdict(set)
@@ -164,10 +230,23 @@ class HostLookups:
                 by_uei[(unit.state, uei)].add(uid)
             for key in unit.names:
                 by_name[(unit.state, key)].add(uid)
+        districts = _districts(lea_directory) if lea_directory is not None else {}
+        by_phrase: dict[tuple[str, tuple[str, ...]], set[str]] = defaultdict(set)
+        by_core: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for leaid, district in districts.items():
+            if district.state is None:
+                continue
+            for phrase in district.phrases:
+                by_phrase[(district.state, phrase)].add(leaid)
+            for core in district.cores:
+                by_core[(district.state, core)].add(leaid)
         return cls(
             units,
             {k: frozenset(v) for k, v in by_uei.items()},
             {k: frozenset(v) for k, v in by_name.items()},
+            districts,
+            {k: frozenset(v) for k, v in by_phrase.items()},
+            {k: frozenset(v) for k, v in by_core.items()},
         )
 
     def units_by_uei(self, state: str, uei: str | None) -> frozenset[str]:
@@ -176,6 +255,29 @@ class HostLookups:
     def units_by_name(self, state: str, name: str | None) -> frozenset[str]:
         key = name_key(name)
         return self._by_name.get((state, key), frozenset()) if key else frozenset()
+
+    def districts_by_core(self, state: str, recipient_name: str | None) -> frozenset[str]:
+        """Districts whose core name equals the Recipient's (the Recipient is the district)."""
+        core = lea_core(recipient_name)
+        return self._district_by_core.get((state, core), frozenset()) if core else frozenset()
+
+    def districts_named_in(self, state: str, text: str | None) -> list[frozenset[str]]:
+        """Each district mention in the text: the same-state LEAIDs it names (more than one = ambiguous).
+
+        A mention nested inside a longer mention is dropped ('KANSAS CITY PUBLIC SCHOOLS'
+        is not also 'CITY PUBLIC SCHOOLS')."""
+        tokens = _phrase(text or "")
+        spans = []
+        for i in range(len(tokens)):
+            for j in range(len(tokens), i + 1, -1):
+                hit = self._district_by_phrase.get((state, tokens[i:j]))
+                if hit:
+                    spans.append((i, j, hit))
+                    break
+        return [
+            hit for i, j, hit in spans
+            if not any(a <= i and j <= b and (b - a) > (j - i) for a, b, _ in spans)
+        ]
 
 
 # ----------------------------------------------------------------- linker
@@ -190,6 +292,7 @@ class GrantFacts:
     recipient_uei: str | None
     recipient_state: str | None
     business_types: str | None = None
+    descriptions: tuple[str, ...] = ()  # the Grant's distinct award descriptions
 
     @property
     def fain_prefix(self) -> str:
@@ -238,9 +341,9 @@ def _college_signals(grant: GrantFacts, lookups: HostLookups) -> dict[str, set[s
 def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
     """Link one Grant to its Host institution. Pure: no I/O, no clock."""
     kind = recipient_kind(grant.business_types, grant.recipient_name)
-    colleges = _college_signals(grant, lookups)
     if grant.fain_prefix == GEAR_UP_PARTNERSHIP_PREFIX:
-        colleges = {}  # partnerships serve district cohorts; the college partner is never the Host
+        return _link_gear_up_partnership(grant, kind, lookups)
+    colleges = _college_signals(grant, lookups)
 
     candidates = tuple(
         Candidate(UNITID, uid, lookups.units[uid].name, tuple(sorted(sig)))
@@ -280,12 +383,59 @@ def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
             return result(REVIEW, "uei_vs_name_conflict", by_uei[0])
         return result(REVIEW, "system_campus_not_stated")
 
-    if grant.fain_prefix == GEAR_UP_PARTNERSHIP_PREFIX:
-        # Districts are not looked up yet (#36), so "names no district" can't be decided here.
-        return result(UNMATCHED, "no_candidate_gearup_partnership")
     if kind == NONPROFIT:
         return result(NO_SINGLE_HOST, "nonprofit_no_site_named")
     return result(UNMATCHED, f"no_candidate_{kind.lower()}")
+
+
+def _link_gear_up_partnership(grant: GrantFacts, kind: str, lookups: HostLookups) -> HostLink:
+    """GEAR UP partnership (P334A): the Host is the district served, never the college partner.
+
+    A district is named when the Recipient is the district itself (`name`: same core
+    name, Recipient kind LEA) or an award description names it (`desc`). Same state only.
+    One district named -> matched; several -> no single Host; none -> no single Host;
+    a mention that fits several same-state districts -> review.
+    """
+    state = grant.recipient_state
+    signals: dict[str, set[str]] = defaultdict(set)
+    mentions: list[frozenset[str]] = []
+    if state:
+        if kind == LEA:
+            named = lookups.districts_by_core(state, grant.recipient_name)
+            if named:
+                mentions.append(named)
+            for leaid in named:
+                signals[leaid].add("name")
+        for description in grant.descriptions:
+            for named in lookups.districts_named_in(state, description):
+                mentions.append(named)
+                for leaid in named:
+                    signals[leaid].add("desc")
+
+    candidates = tuple(
+        Candidate(LEAID, leaid, lookups.districts[leaid].name, tuple(sorted(sig)))
+        for leaid, sig in sorted(signals.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    )
+
+    def result(outcome: str, case_label: str, pick: str | None = None) -> HostLink:
+        return HostLink(
+            fain=grant.fain, outcome=outcome, case_label=case_label,
+            host_kind=LEAID if pick else None, host_id=pick,
+            host_name=lookups.districts[pick].name if pick else None,
+            candidates=candidates,
+        )
+
+    if not mentions:
+        return result(NO_SINGLE_HOST, "gearup_partnership_no_district_named")
+    named_once = {leaid for named in mentions if len(named) == 1 for leaid in named}
+    if len(named_once) > 1:
+        return result(NO_SINGLE_HOST, "several_districts_named")
+    if len(named_once) == 1:
+        (leaid,) = named_once
+        if all(leaid in named for named in mentions):
+            label = "district_is_recipient" if "name" in signals[leaid] else "district_named_in_desc"
+            return result(MATCHED, label, leaid)
+    return result(REVIEW, "district_name_ambiguous")
 
 
 # ------------------------------------------------------------ joined tables
@@ -330,10 +480,24 @@ def grant_facts(grants: pl.DataFrame, actions: pl.DataFrame) -> list[GrantFacts]
         .group_by("fain", maintain_order=True)
         .agg(pl.col("business_types").drop_nulls().first())
     )
-    rows = grants.select("fain", "recipient_name", "recipient_uei", "recipient_state").join(
-        business_types, on="fain", how="left"
+    descriptions = (
+        actions.select("fain", description=pl.concat_list("transaction_description", "base_transaction_description"))
+        .explode("description")
+        .drop_nulls("description")
+        .unique()
+        .sort("fain", "description")
+        .group_by("fain", maintain_order=True)
+        .agg("description")
     )
-    return [GrantFacts(**r) for r in rows.iter_rows(named=True)]
+    rows = (
+        grants.select("fain", "recipient_name", "recipient_uei", "recipient_state")
+        .join(business_types, on="fain", how="left")
+        .join(descriptions, on="fain", how="left")
+    )
+    return [
+        GrantFacts(**{k: v for k, v in r.items() if k != "description"}, descriptions=tuple(r["description"] or ()))
+        for r in rows.iter_rows(named=True)
+    ]
 
 
 def build_host_links(

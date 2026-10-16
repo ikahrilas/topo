@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 from conftest import REPO_ROOT
-from support.curated import (
+from support.curated_totals import (
     ALLOCATION_COLUMNS,
     APPROPRIATION_COLUMNS,
     allocation,
