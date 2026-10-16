@@ -306,6 +306,11 @@ def test_match_quality_report_shows_linking_quality(project):
         "matched": "10", "review": "2", "unmatched": "3", "Grants": "15",
     }
     assert programs["Talent Search"]["no_single_host"] == "10"
+    flags = by(table(text, "By Host-link flag"), "Flag")
+    assert {f: (r["unmatched"], r["Grants"]) for f, r in flags.items()} == {
+        "followed_ipeds_merge": ("0", "0"), "unit_as_of_start_year": ("0", "0"), "no_uei": ("2", "2"),
+    }
+    assert "+" not in "".join(accuracy(project))  # flags never split a Case label
     years = by(table(text, "By start year"), "Start FY")
     assert {y: r["Grants"] for y, r in years.items()} == {"2020": "1", "2021": "1", "2025": "25"}
 

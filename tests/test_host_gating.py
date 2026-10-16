@@ -15,6 +15,7 @@ def link(fain: str, outcome: str, case_label: str, host_id: str | None) -> dict:
         "fain": fain, "outcome": outcome, "case_label": case_label,
         "host_kind": "UNITID" if host_id else None, "host_id": host_id, "host_name": "College" if host_id else None,
         "host_confidence": {"matched": "matched", "review": "in review"}[outcome],
+        "followed_ipeds_merge": False, "unit_as_of_start_year": False, "no_uei": False,
     }
 
 

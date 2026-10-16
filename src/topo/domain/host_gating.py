@@ -129,6 +129,9 @@ class GatedHostLinks(pa.DataFrameModel):
     host_id: str = pa.Field(nullable=True)
     host_name: str = pa.Field(nullable=True)
     host_confidence: str = pa.Field(isin=list(HOST_CONFIDENCE.values()))
+    followed_ipeds_merge: bool
+    unit_as_of_start_year: bool
+    no_uei: bool
     rule_outcome: str = pa.Field(isin=list(HOST_CONFIDENCE))
     rule_case_label: str
     gating: str = pa.Field(isin=list(GATING))

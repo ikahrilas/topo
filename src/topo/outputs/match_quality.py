@@ -3,7 +3,7 @@
 Sections: outcome split by count and dollars; accuracy per Case label with its
 sample size and gating; overrides in force; review and unmatched lists by FAIN;
 Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
-with no UEI; breakdowns by Program and by start year; Pull date, As-of date and
+with no UEI; breakdowns by Program, by start year and by Host-link flag; Pull date, As-of date and
 input hashes. Dollars are obligations over the reporting-window fiscal years.
 The observed-gap table per Program and the renewal-timing backtest scores with
 its misses (#41). Context reason codes: Grants per Local context reason code
@@ -20,7 +20,7 @@ from pathlib import Path
 import polars as pl
 
 from topo.domain.host_gating import Gate
-from topo.domain.host_linking import MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
+from topo.domain.host_linking import FLAGS, MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
 from topo.domain.local_context import context_reason_counts
 from topo.fiscal import fiscal_year
 from topo.outputs.delivery import delivery_path, write_new
@@ -217,6 +217,21 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
     )
     out += ["", "## By start year", "", "Fiscal year of the Grant's project start.", ""]
     out += _table(["Start FY", *header], _outcome_counts(by_year, "start_fy"))
+
+    out += [
+        "",
+        "## By Host-link flag",
+        "",
+        "Notes beside the Case label, never part of it: gating and accuracy run on the Case label alone. "
+        "followed_ipeds_merge = linked to the same-state unit an IPEDS unit merged into; unit_as_of_start_year = "
+        "kept as the unit it was at the Grant's start year; no_uei = the Recipient carries no UEI.",
+        "",
+    ]
+    out += _table(["Flag", *header], [
+        [flag, *(links.filter(pl.col(flag) & (pl.col("outcome") == o)).height for o in OUTCOMES),
+         links.filter(pl.col(flag)).height, _money(links.filter(pl.col(flag))["dollars"].sum())]
+        for flag in FLAGS
+    ])
 
     out += _renewal_timing_sections(inputs)
     if inputs.local_context is not None:

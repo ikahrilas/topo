@@ -22,9 +22,10 @@ Grant's start year, else the same-state surviving unit. IPEDS system offices
 (sector 0) never beat a real campus and alone go to review. The No single Host
 rules. GEAR UP partnerships (#36) link only to districts (CCD LEAIDs) named by
 the Recipient itself or the award descriptions, never to the college partner.
-Case labels follow the prototype taxonomy (prototypes/host-linking/README.md),
-with notes appended after "+": `followed_ipeds_merge`,
-`ipeds_unit_as_of_start_year`, `no_uei`.
+Case labels follow the prototype taxonomy (prototypes/host-linking/README.md).
+Each label maps to one outcome and is the stratum gating scores. Notes that are
+not rules sit beside it as flags, never in it: `followed_ipeds_merge`,
+`unit_as_of_start_year`, `no_uei`.
 """
 
 from __future__ import annotations
@@ -133,10 +134,11 @@ GENERIC = {
 _CAMPUS_SUFFIX = re.compile(r"([- ]+Main Campus| District)$", re.IGNORECASE)
 _ALIAS_ACRONYM = re.compile(r"[A-Z]{2,6}")
 
-# Notes appended to a Case label ("uei_confirmed+followed_ipeds_merge").
+# Flags beside the Case label (boolean columns on the Host link), never part of it.
 FOLLOWED_IPEDS_MERGE = "followed_ipeds_merge"  # no record at the start year: linked to the same-state survivor
-UNIT_AS_OF_START_YEAR = "ipeds_unit_as_of_start_year"  # merged later: kept as the unit it was at the start year
+UNIT_AS_OF_START_YEAR = "unit_as_of_start_year"  # merged later: kept as the unit it was at the start year
 NO_UEI = "no_uei"  # no Recipient UEI: decided on name, ED list text and description only
+FLAGS = (FOLLOWED_IPEDS_MERGE, UNIT_AS_OF_START_YEAR, NO_UEI)
 
 
 def _tokens(text: str | None) -> list[str]:
@@ -454,6 +456,9 @@ class HostLink:
     host_id: str | None = None
     host_name: str | None = None
     candidates: tuple[Candidate, ...] = ()
+    followed_ipeds_merge: bool = False
+    unit_as_of_start_year: bool = False
+    no_uei: bool = False
 
     @property
     def host_confidence(self) -> str:
@@ -562,7 +567,7 @@ def _decide_college(
             return (MATCHED, "uei_only", uid) if kind in (IHE, AUX) else (REVIEW, "uei_only_non_college", uid)
         if sig == {"name"} and "address" in with_address:
             return MATCHED, "name_and_address", uid
-        return REVIEW, "single_weak_signal:" + "+".join(sorted(sig)), uid
+        return REVIEW, "single_weak_signal:" + ",".join(sorted(sig)), uid
 
     uei = _with(colleges, {"uei"})
 
@@ -623,17 +628,18 @@ def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
     )
 
     def result(outcome: str, case_label: str, pick: str | None = None) -> HostLink:
-        notes = [merges[pick]] if pick in merges else []
-        if outcome != NO_SINGLE_HOST and not grant.recipient_uei:
-            notes.append(NO_UEI)
+        merge = merges.get(pick) if pick else None
         return HostLink(
             fain=grant.fain,
             outcome=outcome,
-            case_label="+".join([case_label, *notes]),
+            case_label=case_label,
             host_kind=UNITID if pick else None,
             host_id=pick,
             host_name=lookups.units[pick].name if pick else None,
             candidates=() if outcome == UNMATCHED else candidates,
+            followed_ipeds_merge=merge == FOLLOWED_IPEDS_MERGE,
+            unit_as_of_start_year=merge == UNIT_AS_OF_START_YEAR,
+            no_uei=outcome != NO_SINGLE_HOST and not grant.recipient_uei,
         )
 
     if grant.fain_prefix == GEAR_UP_STATE_PREFIX:
@@ -712,6 +718,9 @@ class HostLinks(pa.DataFrameModel):
     host_id: str = pa.Field(nullable=True)
     host_name: str = pa.Field(nullable=True)
     host_confidence: str = pa.Field(isin=list(HOST_CONFIDENCE.values()))
+    followed_ipeds_merge: bool
+    unit_as_of_start_year: bool
+    no_uei: bool
 
     class Config:
         strict = True
@@ -790,10 +799,11 @@ def build_host_links(
                 "fain": link.fain, "outcome": link.outcome, "case_label": link.case_label,
                 "host_kind": link.host_kind, "host_id": link.host_id, "host_name": link.host_name,
                 "host_confidence": link.host_confidence,
+                **{flag: getattr(link, flag) for flag in FLAGS},
             }
             for link in links
         ],
-        schema={c: pl.String for c in HostLinks.to_schema().columns},
+        schema={c: pl.Boolean if c in FLAGS else pl.String for c in HostLinks.to_schema().columns},
     ).sort("fain")
     candidate_rows = pl.DataFrame(
         [

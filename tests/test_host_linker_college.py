@@ -141,11 +141,11 @@ CASES = {
     # IPEDS merges
     "merged_unit_as_of_the_start_year": (
         grant("P047A200031", "CALIFORNIA UNIVERSITY OF PENNSYLVANIA", "PA", "CALUUEI00001", start_year=2020),
-        ("matched", "uei_confirmed+ipeds_unit_as_of_start_year", "UNITID", "211431"),
+        ("matched", "uei_confirmed", "UNITID", "211431"),
     ),
     "merged_unit_falls_back_to_the_same_state_survivor": (
         grant("P047A230032", "CALIFORNIA UNIVERSITY OF PENNSYLVANIA", "PA", "CALUUEI00001", start_year=2023),
-        ("matched", "uei_confirmed+followed_ipeds_merge", "UNITID", "482680"),
+        ("matched", "uei_confirmed", "UNITID", "482680"),
     ),
     "merged_unit_never_follows_a_survivor_across_a_state_line": (
         grant("P042A230033", "MILLS COLLEGE", "CA", "MILLSUEI0001", start_year=2023),
@@ -164,11 +164,11 @@ CASES = {
     # UEI-less Grants
     "uei_less_match_is_labelled": (
         grant("P042A220051", LOS_RIOS, "CA", None, ed="American River College", zip="95841"),
-        ("matched", "campus_text_confirmed+no_uei", "UNITID", "109208"),
+        ("matched", "campus_text_confirmed", "UNITID", "109208"),
     ),
     "uei_less_unmatched_is_labelled": (
         grant("P042A220052", "PALO VERDE COLLEGE FINANCING CORPORATION", "CA", None),
-        ("unmatched", "no_candidate_ihe+no_uei", None, None),
+        ("unmatched", "no_candidate_ihe", None, None),
     ),
     "uei_less_no_single_host_keeps_its_rule_label": (
         grant("P044A220053", "COLLEGE ACCESS NOW", "CA", None, business_types=NONPROFIT),
@@ -251,3 +251,24 @@ def test_each_case_label_maps_to_exactly_one_outcome():
             link = link_host(facts, lookups)
             outcomes.setdefault(link.case_label, set()).add(link.outcome)
     assert {label: o for label, o in outcomes.items() if len(o) > 1} == {}
+
+
+@pytest.mark.parametrize("case, flags", [
+    ("merged_unit_as_of_the_start_year", {"unit_as_of_start_year"}),
+    ("merged_unit_falls_back_to_the_same_state_survivor", {"followed_ipeds_merge"}),
+    ("uei_less_match_is_labelled", {"no_uei"}),
+    ("uei_less_unmatched_is_labelled", {"no_uei"}),
+    ("uei_less_no_single_host_keeps_its_rule_label", set()),
+    ("campus_text_picks_one", set()),
+])
+def test_merge_and_uei_notes_are_flags_beside_the_case_label_never_part_of_it(case, flags):
+    link = link_host(CASES[case][0], LOOKUPS)
+    shown = {f for f in ("followed_ipeds_merge", "unit_as_of_start_year", "no_uei") if getattr(link, f)}
+    assert shown == flags
+    assert "+" not in link.case_label
+
+
+def test_several_weak_signals_are_named_without_a_plus():
+    link = link_host(grant("P042A220007", LOS_RIOS, "CA", "LOSRIOSUEI01", ed="American River College",
+                           desc="UPWARD BOUND AT AMERICAN RIVER COLLEGE"), LOOKUPS)
+    assert (link.outcome, link.case_label) == ("review", "single_weak_signal:desc,ed_list")
