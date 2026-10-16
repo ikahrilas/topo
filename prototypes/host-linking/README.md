@@ -110,7 +110,7 @@ These follow #3's hand-labelling rules. They are policies, not facts:
 
 ```
 uv venv -p 3.12 /tmp/topo_proto/.venv && uv pip install -p /tmp/topo_proto/.venv polars==2.0.0 pdfplumber==0.11.10 rapidfuzz==3.14.6
-git show research/recipient-vs-host:docs/research/recipient-vs-host-institution.md > /tmp/topo_proto/rvh.md
+cp docs/research/recipient-vs-host-institution.md /tmp/topo_proto/rvh.md
 /tmp/topo_proto/.venv/bin/python -I prototypes/host-linking/link_hosts.py \
   --archive <FY2024_091_Assistance_Full_20261007_1.csv> --ipeds <colleges_ipeds_directory.csv> \
   --lea <school-districts_lea_directory.csv> --ed-dir data/raw/ed_grantee_lists \
@@ -125,4 +125,4 @@ Run with Python 3.12. It takes about 2 minutes.
 | IPEDS directory, all years (names used from 2015, UEIs from 2022) | `educationdata.urban.org/csv/ipeds/colleges_ipeds_directory.csv` (Urban Institute Education Data Portal v0.27.0, ODC-By) | `26b451e7cd4adb4eeef01eb9e3f2556739672d46868a681690d56c91152ab088` |
 | CCD LEA directory (year 2024; agency types 1, 2, 4, 5, 7) | `educationdata.urban.org/csv/ccd/school-districts_lea_directory.csv` | `144db253d2602ab207130263bbdfe4aa09f937b6a55aa48eb7603d66eb957bec` |
 | ED FY2024 grantee lists, 7 TRIO PDFs | `data/raw/ed_grantee_lists/` (hashes in `manifest.csv`) | — |
-| #3 hand labels (Appendix B) | `docs/research/recipient-vs-host-institution.md` on branch `research/recipient-vs-host` (d4a43fc) | — |
+| #3 hand labels (Appendix B) | `docs/research/recipient-vs-host-institution.md` (merged to `main` from `research/recipient-vs-host`, d4a43fc) | — |
