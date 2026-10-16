@@ -5,9 +5,10 @@ sample size and gating; overrides in force; review and unmatched lists by FAIN;
 Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
 with no UEI; breakdowns by Program and by start year; Pull date, As-of date and
 input hashes. Dollars are obligations over the reporting-window fiscal years.
-It also carries the observed-gap table per Program and the renewal-timing
-backtest scores with its misses (#41). Later tickets add context reason codes
-and the founder spot-check block.
+The observed-gap table per Program and the renewal-timing backtest scores with
+its misses (#41). Context reason codes: Grants per Local context reason code
+(#38), every code listed. The founder spot-check block counts Review findings
+by review date, apart from the answer key.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import polars as pl
 
 from topo.domain.host_gating import Gate
 from topo.domain.host_linking import MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
+from topo.domain.local_context import context_reason_counts
 from topo.fiscal import fiscal_year
 from topo.outputs.delivery import delivery_path, write_new
 from topo.outputs.review_queue import grant_dollars
@@ -47,6 +49,8 @@ class MatchQualityInputs:
     backtest: pl.DataFrame | None = None  # topo.domain.renewal_backtest: renewal_backtest
     backtest_grants: pl.DataFrame | None = None  # renewal_backtest_grants
     backtest_bar: float = 0.95
+    local_context: pl.DataFrame | None = None  # joined local_context (topo.domain.local_context.LocalContext)
+    founder_spot_check: pl.DataFrame | None = None  # topo.review_findings.spot_check_summary
 
 
 def _money(value: float | None) -> str:
@@ -215,6 +219,18 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
     out += _table(["Start FY", *header], _outcome_counts(by_year, "start_fy"))
 
     out += _renewal_timing_sections(inputs)
+    if inputs.local_context is not None:
+        reasons = context_reason_counts(inputs.local_context)
+        out += [
+            "",
+            "## Context reason codes",
+            "",
+            "Grants whose Local context is blank, in whole or in part, by reason. Context comes only through the "
+            "Host institution, never the Recipient or the state. A Grant can carry more than one code.",
+            "",
+        ]
+        out += _table(["Context reason", "Grants"], reasons.rows())
+    out += _founder_spot_check(inputs.founder_spot_check)
 
     out += ["", "## Inputs", ""]
     out += _table(["Input", "SHA-256"], [[path, sha] for path, sha in inputs.input_hashes])
@@ -280,6 +296,21 @@ def _renewal_timing_sections(inputs: MatchQualityInputs) -> list[str]:
               "yes" if r["re_competed"] else "no"] for r in misses.iter_rows(named=True)],
         )
     return out
+
+
+def _founder_spot_check(summary: pl.DataFrame | None) -> list[str]:
+    """The founder spot-check block: Review findings by review date, apart from the answer key."""
+    out = [
+        "",
+        "## Founder spot-check",
+        "",
+        "Review findings from the founder's spot checks, by review date. They are kept apart from the answer "
+        "key, never scored in the accuracy above, and never change an override by themselves.",
+    ]
+    if summary is None or not summary.height:
+        return out + ["", "No Review findings yet."]
+    out.append("")
+    return out + _table(list(summary.columns), [list(r) for r in summary.iter_rows()])
 
 
 def write_match_quality(text: str, output_dir: Path, pull_date: dt.date) -> Path:

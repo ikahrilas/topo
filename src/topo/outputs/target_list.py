@@ -8,7 +8,9 @@ Funding status, Latest readable status, Readable from, Lifecycle stage and the
 institution, Host ID, Host confidence and Case label come from Host linking
 (#32). The displayed label and Priority tier come from
 topo.domain.priority_tier (#33). Re-competing soon, Predicted due date and
-Evidence tier (#40) and Local context (#38) are added by later tickets.
+Evidence tier come from renewal timing (#40). Local context (#38): institution
+type, enrollment, the Host's or Campus district's poverty rate, each with its
+data year, and a reason code when null.
 
 Rows sort by Priority tier, then Host confidence (matched first), then award
 date, then State. Ended Grants go to the Ended sheet; every other row, whatever
@@ -30,6 +32,7 @@ from openpyxl.styles import Font
 from topo.domain.cause_notes import cited
 from topo.domain.funding_status import ENDED, NOT_YET_READABLE
 from topo.domain.grant_universe import GrantUniverse
+from topo.domain.local_context import CAMPUS_DISTRICT, HOST_DISTRICT, LocalContext
 from topo.domain.host_linking import HOST_CONFIDENCE, MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
 from topo.domain.priority_tier import RowFacts, label_row
 from topo.domain.programs import PROGRAMS
@@ -43,6 +46,7 @@ ENDED_SHEET = "Ended"
 MISSING_SHEET = "Missing"
 README_SHEET = "README"
 MISSING_COLUMNS = ("State", "Recipient", "Program", "Note")
+LAST_FOUNDER_MARK = "Last founder mark"  # the latest Review finding on the FAIN, read-only
 
 FUNDING_COLUMNS = {  # joined grant_funding_status column -> display column
     "funding_status": "Funding status",
@@ -61,6 +65,8 @@ ATTRIBUTIONS = (
     "with attribution to D&B (https://www.usaspending.gov/db-info).",
     "IPEDS, CCD, via Education Data Portal v. 0.27.0, Urban Institute, under ODC Attribution License "
     "(https://educationdata.urban.org; https://opendatacommons.org/licenses/by/1-0/).",
+    "Campus points and school district boundaries: NCES EDGE (https://nces.ed.gov/programs/edge/), public domain. "
+    "Child poverty: U.S. Census Bureau, Small Area Income and Poverty Estimates (SAIPE), school districts.",
 )
 GLOSSARY = (
     ("Grant", "One funded project for one project period, identified by its FAIN; a renewal is a new Grant."),
@@ -87,7 +93,16 @@ GLOSSARY = (
                            "\"timing not predicted\" when the Program's cycle isn't 60 months, and for GEAR UP."),
     ("End date", "GEAR UP only: the Grant's expected end, when it falls within the lead time. An end date, "
                  "not a due date."),
-    ("Cause note","Shown only where a cited public source names the Grant's FAIN."),
+    ("Local context", "Institution type, enrollment and the ages 5-17 poverty rate of the Host institution's "
+                      "place, each with its data year; it describes where the Host sits, not who the project "
+                      "serves. Never taken from the Recipient or the state. When blank, Context reason says why: "
+                      "no_saipe_row, no_campus_district, no_enrollment_row, no_single_host, unmatched, in_review."),
+    ("Campus district", "The school district a college Host's campus lies in; its poverty rate is labelled as the "
+                        "campus's district, never as the served schools'. A campus in both an elementary and a "
+                        "secondary or unified district shows the secondary or unified one and notes the overlap."),
+    ("Cause note", "Shown only where a cited public source names the Grant's FAIN."),
+    ("Last founder mark", "The founder's latest spot-check mark on the FAIN (ok, wrong or stale, with the field "
+                          "and note). Read-only; a mark never changes any other field by itself."),
     ("Pull date", "The date the source data was fetched."),
     ("As-of date", "The date the data is read as of; Funding status is judged against it."),
 )
@@ -157,6 +172,38 @@ TIMING_COLUMNS = {  # joined renewal_timing column -> display column (#40)
 }
 
 
+POVERTY_BASIS = {CAMPUS_DISTRICT: "Campus district", HOST_DISTRICT: "Host district"}
+
+LOCAL_CONTEXT_COLUMNS = {  # joined local_context column -> display column (#38; built in _local_context)
+    "institution_type": "Institution type",
+    "institution_type_year": "Institution type year",
+    "enrollment": "Enrollment",
+    "enrollment_year": "Enrollment year",
+    "poverty_rate_5_17": "Poverty rate (ages 5-17)",
+    "poverty_rate_of": "Poverty rate of",
+    "poverty_rate_year": "Poverty rate year",
+    "campus_district_year": "Campus district year",
+    "campus_district_overlap": "Campus district overlap",
+    "context_reason": "Context reason",
+}
+
+
+def _local_context(local_context: pl.DataFrame | None) -> pl.DataFrame:
+    """Display columns of Local context; the poverty rate is labelled by whose district it is."""
+    if local_context is None:
+        local_context = pl.DataFrame(
+            schema={name: col.dtype.type for name, col in LocalContext.to_schema().columns.items()}
+        )
+    return local_context.select(
+        "fain",
+        *(pl.col(src).alias(shown) for src, shown in LOCAL_CONTEXT_COLUMNS.items() if src != "poverty_rate_of"),
+        pl.concat_str(
+            pl.col("poverty_rate_basis").replace_strict(POVERTY_BASIS, default=None),
+            pl.lit(": "), "poverty_district_name", pl.lit(" (LEAID "), "poverty_district_leaid", pl.lit(")"),
+        ).alias("Poverty rate of"),
+    )
+
+
 def build_target_list(
     universe: GrantUniverse,
     as_of: dt.date,
@@ -168,6 +215,8 @@ def build_target_list(
     pull_date: dt.date | None = None,
     settings: TargetListSettings = TargetListSettings(),
     timing: pl.DataFrame | None = None,
+    local_context: pl.DataFrame | None = None,
+    founder_marks: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Every target-list row (main and Ended sheets), sorted, in display column order.
 
@@ -176,6 +225,8 @@ def build_target_list(
     joined funding_status table (one row per FAIN and Budget period). `cause_notes`
     is the curated cause-notes table (topo.domain.cause_notes). `timing` is the
     joined renewal_timing table (topo.domain.renewal_timing, one row per FAIN).
+    `founder_marks` holds "Last founder mark" per FAIN (topo.review_findings.last_founder_marks),
+    read-only. `local_context` is the joined local_context table (topo.domain.local_context.LocalContext).
     """
     if funding is None:
         funding = pl.DataFrame(schema={"fain": pl.String, **{c: pl.String for c in FUNDING_COLUMNS}})
@@ -229,6 +280,8 @@ def build_target_list(
         .join(_latest_readable_periods(funding_periods), on="fain", how="left")
         .join(notes, on="fain", how="left")
         .join(timing, on="fain", how="left")
+        .join(_local_context(local_context), on="fain", how="left")
+        .join(_founder_marks(founder_marks), on="fain", how="left")
         .with_columns(pl.col(labels).fill_null(0.0), pl.col("Cumulative obligation").fill_null(0.0))
     )
     rows = rows.with_columns(
@@ -272,7 +325,9 @@ def build_target_list(
             "Latest FY obligation",
             "Cumulative obligation",
             *labels,
+            *LOCAL_CONTEXT_COLUMNS.values(),
             pl.col("data_note").alias("Data note"),
+            LAST_FOUNDER_MARK,
             pl.col("pull_date").alias("Pull date"),
             pl.lit(as_of).alias("As-of date"),
         )
@@ -297,6 +352,10 @@ def _timing_columns(timing: pl.DataFrame | None) -> pl.DataFrame:
         "timing",
         "end_date_fact",
     )
+def _founder_marks(marks: pl.DataFrame | None) -> pl.DataFrame:
+    if marks is None:
+        return pl.DataFrame(schema={"fain": pl.String, LAST_FOUNDER_MARK: pl.String})
+    return marks.select("fain", LAST_FOUNDER_MARK)
 
 
 def _award_dates(grant_actions: pl.DataFrame) -> pl.DataFrame:

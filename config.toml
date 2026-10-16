@@ -129,6 +129,33 @@ directory_from_year = 2015
 # 7 independent charter agency (the host-linking prototype's set).
 agency_types = [1, 2, 4, 5, 7]
 
+[saipe]
+# Census SAIPE school-district estimates, fetched by `topo pull saipe` from the
+# Census flat file (one request; never Urban's /api/). Urban's SAIPE CSV stops
+# at 2022. `data_year` is the estimate year of that file (ussd24 = 2024
+# estimates, 2024-25 district boundaries).
+school_districts_url = "https://www2.census.gov/programs-surveys/saipe/datasets/2024/2024-school-districts/ussd24.csv"
+data_year = 2024
+
+[edge]
+# NCES EDGE files, fetched by `topo pull edge`: postsecondary campus geocodes
+# (lat/lon by UNITID) and the composite school district polygons (SY 2024-25,
+# GEOID = LEAID except pseudo-districts). Public domain.
+# UNVERIFIED download paths: check them against
+# https://nces.ed.gov/programs/edge/Geographic/SchoolLocations and
+# https://nces.ed.gov/programs/edge/Geographic/DistrictBoundaries before the first pull.
+postsecondary_geocodes_url = "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_POSTSECSCH_2526.zip"
+school_districts_url = "https://nces.ed.gov/programs/edge/data/EDGE_SCHOOLDISTRICT_TL25_SY2425.zip"
+
+[census_geocoder]
+# Fallback only: Campus districts for college Hosts with no EDGE campus point,
+# one single-record call each (`topo pull census_geocoder`, after a first run).
+# The vintage should match the EDGE district polygons (SY 2024-25 = ACS2025_Current).
+url = "https://geocoding.geo.census.gov/geocoder/geographies/address"
+benchmark = "Public_AR_Current"
+vintage = "ACS2025_Current"
+pause_seconds = 1.0
+
 [renewal_timing]
 # Renewal timing (#40). The Predicted due date of a Program's next competition is
 # the prior Cohort's published deadline (data/curated/<deadline_table>, each row
@@ -154,3 +181,26 @@ pass_bar = 0.95
 # edited. `topo score-predictions` writes each later scoring as a new file.
 freeze_competition_fy = 2027
 frozen_predictions = "fy2027_predictions.csv"
+
+[spot_check]
+# Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
+# (data/curated/review_findings.csv). ASSUMPTION: the founder checks 2–3 states.
+min_states = 2
+max_states = 3
+note_max_chars = 100
+
+[fac]
+# Federal Audit Clearinghouse full bulk CSVs, fetched by `topo pull fac` (no API
+# key; the links redirect to short-lived signed S3 URLs). federal_awards.csv is
+# about 1.4 GB. Public domain. docs/research/federal-audit-clearinghouse.md.
+federal_awards_url = "https://app.fac.gov/dissemination/public-data/gsa/full/federal_awards.csv"
+general_url = "https://app.fac.gov/dissemination/public-data/gsa/full/general.csv"
+# Plausibility check (#43): FAC direct-line amount expended vs USAspending
+# obligations per (Recipient UEI, listing), summed over `plausibility_years`
+# fiscal years ending `audit_lag_years` before the last ended FY (the latest audit
+# year is still being filed). Ratios outside [low, high] are flagged `review`;
+# nothing passes or fails. ASSUMPTION: 5 years, 0.5 / 1.5, one-year lag.
+plausibility_years = 5
+audit_lag_years = 1
+plausibility_ratio_low = 0.5
+plausibility_ratio_high = 1.5

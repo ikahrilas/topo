@@ -17,6 +17,7 @@ import polars as pl
 
 from topo import curated, curated_totals, provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
+from topo.domain.fac_plausibility import PlausibilitySettings, Span, build_fac_plausibility
 from topo.domain.ed_lists import NOT_IN_USASPENDING, join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
 from topo.domain.grant_universe import (
@@ -34,6 +35,7 @@ from topo.domain.renewal_backtest import (
     run_backtest,
     score_frozen_predictions,
 )
+from topo.domain.local_context import build_local_context, locate_campus_districts
 from topo.domain.renewal_timing import (
     RenewalSettings,
     new_award_fys,
@@ -72,10 +74,13 @@ from topo.outputs.target_list import (
     provisional_fiscal_years,
     write_target_list,
 )
+from topo.outputs.fac_plausibility import write_plausibility_csv
 from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
-from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
+from topo.review_findings import last_founder_marks, read_review_findings, spot_check_summary
+from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
+from topo.sources import SOURCES, ccd, census_geocoder, ed_grantee_lists, edge, fac, ipeds, saipe, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
@@ -90,6 +95,7 @@ GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
 RECONCILIATION = "reconciliation"  # one row per (check, Program, FY)
 ED_LIST_FAIN_DIFFERENCES = "ed_list_fain_differences"  # TRIO ED-list rows that disagree with USAspending, by FAIN
 UNFUNDED_ED_LIST_EVIDENCE = "unfunded_ed_list_evidence"  # per (Program, FY) plus an overall row
+FAC_PLAUSIBILITY = "fac_plausibility"  # per (Recipient UEI, listing): plausibility, not reconciliation
 # Succession and lookback (#39). Lookback Grants feed only these tables, never amounts or reconciliation.
 LOOKBACK_GRANTS = "lookback_grants"  # Grants that ended before the window, back to the lookback horizon
 LOOKBACK_HOST_LINKS = "lookback_host_links"
@@ -97,6 +103,9 @@ COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date,
 GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
 SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
 HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
+# Local context (#38).
+CAMPUS_DISTRICTS = "campus_districts"  # (UNITID, LEAID): every district a college Host's campus lies in
+LOCAL_CONTEXT = "local_context"  # one row per FAIN: context via the Host, each field with its data year
 # Renewal timing (#40).
 COHORT_TIMING = "cohort_timing"  # (Program, Cohort FY): observed gap, Predicted due date, evidence tier
 RENEWAL_TIMING = "renewal_timing"  # one row per FAIN: Cohort timing, Re-competing soon, GEAR UP end-date fact
@@ -171,13 +180,50 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
     host_links, after_rules = _join_host_links(config, universe, actions, lookups)
     successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
+    _join_local_context(config, host_links, pull_date)
     _join_funding_status(config, universe, context, successors)
     _join_renewal_timing(config, universe, actions, context)
     _join_renewal_backtest(config, actions)
     _join_ed_lists(config, universe, actions, pull_date)
     _join_reconciliation(config, universe, context)
+    _join_fac_plausibility(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
+
+
+def _join_local_context(config: Config, host_links: pl.DataFrame, pull_date: dt.date) -> None:
+    """Campus districts of college Hosts and one Local context row per Grant, via its final Host link only."""
+    colleges = host_links.filter(pl.col("host_kind") == UNITID)["host_id"].unique()
+    points = edge.read_geocodes(config).filter(pl.col("unitid").is_in(colleges.implode()))
+    polygons = config.layout.cleaned_table(edge.DISTRICTS_TABLE)
+    campus_districts = locate_campus_districts(
+        points, polygons if polygons.exists() else None, census_geocoder.read_campus_districts(config)
+    )
+    context = build_local_context(
+        host_links,
+        ipeds_directory=ipeds.read_directory(config),
+        ipeds_enrollment=ipeds.read_enrollment(config),
+        lea_directory=ccd.read_lea_directory(config),
+        campus_districts=campus_districts,
+        saipe=saipe.read_school_districts(config),
+    )
+    inputs = [
+        config.layout.cleaned_table(name)
+        for name in (
+            ipeds.DIRECTORY_TABLE, ipeds.ENROLLMENT_TABLE, ccd.LEA_DIRECTORY_TABLE, edge.GEOCODES_TABLE,
+            edge.DISTRICTS_TABLE, saipe.TABLE, census_geocoder.TABLE,
+        )
+    ]
+    run_log.record(
+        config, layer="join", source=LOCAL_CONTEXT, rows_in=host_links.height, rows_out=context.height,
+        drops={}, pull_date=pull_date,
+        input_hash=provenance.combined_hash(
+            f"{p.name} {provenance.file_sha256(p)}" for p in [config.layout.joined_table(HOST_LINKS), *inputs]
+            if p.exists()
+        ),
+    )
+    campus_districts.write_parquet(config.layout.joined_table(CAMPUS_DISTRICTS))
+    context.write_parquet(config.layout.joined_table(LOCAL_CONTEXT))
 
 
 def _join_host_links(
@@ -188,7 +234,7 @@ def _join_host_links(
     Returns the final Host links and the same after-the-rules step, for Host links
     built elsewhere (lookback Grants) to be gated and overridden alike.
     """
-    rule_links, candidates = build_host_links(universe.grants, actions, lookups)
+    rule_links, candidates = build_host_links(universe.grants, actions, lookups, _ed_trio_rows(config))
     answer_key = curated.read_answer_key(config)
     check_separate(answer_key, curated.read_tuning_set(config))
     overrides = curated.read_overrides(config)
@@ -208,6 +254,11 @@ def _join_host_links(
         return apply_overrides(gate_host_links(other_rule_links, accuracy), overrides, host_names)
 
     return links, after_rules
+
+
+def _ed_trio_rows(config: Config) -> pl.DataFrame:
+    """The cleaned ED TRIO list rows: the Host linker reads their "Recipient/ campus" text by exact FAIN."""
+    return ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE)
 
 
 def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pull_date: dt.date) -> None:
@@ -235,7 +286,7 @@ def _join_succession(
     """Lookback Grants, Cohort starts, Succession links and hand-offs; returns FAIN -> successor FAINs."""
     settings = LookbackSettings.from_config(config)
     lookback = build_lookback(actions, universe.window, settings.from_fy_by_family)
-    lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups)[0])
+    lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups, _ed_trio_rows(config))[0])
     grants = pl.concat([universe.grants, lookback.grants])
     grant_actions = pl.concat([universe.grant_actions, lookback.grant_actions])
     cohort_starts, grant_cohorts = derive_cohorts(grants, grant_actions, settings.cohort_min_share)
@@ -393,6 +444,27 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         )
 
 
+def _join_fac_plausibility(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Compare FAC direct lines with USAspending per (UEI, listing); flags only, never pass/fail."""
+    lines = fac.read_award_lines(config)
+    check_layer_handoff(
+        "join", lines.height, "clean", run_log.last_rows_out(config, "clean", fac.AWARD_LINES_TABLE),
+        fac.AWARD_LINES_TABLE,
+    )
+    settings = PlausibilitySettings.from_section(config.section("fac"))
+    result = build_fac_plausibility(
+        universe.grants, universe.fy_obligations, lines, fac.read_audits(config),
+        Span.of(universe.window, settings), settings,
+    )
+    if lines.height:
+        run_log.record(
+            config, layer="join", source=FAC_PLAUSIBILITY, rows_in=result.lines_in, rows_out=result.lines_compared,
+            drops=result.drops, pull_date=context.pull_date,
+            input_hash=provenance.file_sha256(config.layout.cleaned_table(fac.AWARD_LINES_TABLE)),
+        )
+    result.table.write_parquet(config.layout.joined_table(FAC_PLAUSIBILITY))
+
+
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
     joined = config.layout.joined
     context_path = joined / RUN_CONTEXT
@@ -417,6 +489,8 @@ class Delivered:
     review_queue_csv: Path
     match_quality: Path
     reconciliation_csv: Path
+    fac_plausibility_csv: Path
+    spot_check: Path
 
 
 def report(config: Config) -> Delivered:
@@ -424,19 +498,23 @@ def report(config: Config) -> Delivered:
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
+    local_context = pl.read_parquet(config.layout.joined_table(LOCAL_CONTEXT))
     cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
+    findings = read_review_findings(config)
     settings = TargetListSettings.from_section(config.section("target_list"))
     rows = build_target_list(
         universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
         cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
         timing=pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING)),
+        local_context=local_context,
+        founder_marks=last_founder_marks(findings),
     )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS, RENEWAL_TIMING)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS, RENEWAL_TIMING, LOCAL_CONTEXT)
         ),
     )
     readme = ReadmeFacts(
@@ -448,7 +526,10 @@ def report(config: Config) -> Delivered:
         awaited=awaited_notes(universe, settings),
     )
     files = write_target_list(rows, readme, config.layout.output)
-    for path in (files.xlsx, files.csv):
+    spot_check = write_spot_check(
+        rows, readme, SpotCheckSettings.from_section(config.section("spot_check")), config.layout.output
+    )
+    for path in (files.xlsx, files.csv, spot_check):
         provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     candidates = pl.read_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     lookback_grants = pl.read_parquet(config.layout.joined_table(LOOKBACK_GRANTS))
@@ -475,14 +556,20 @@ def report(config: Config) -> Delivered:
             backtest=pl.read_parquet(config.layout.joined_table(RENEWAL_BACKTEST)),
             backtest_grants=pl.read_parquet(config.layout.joined_table(RENEWAL_BACKTEST_GRANTS)),
             backtest_bar=BacktestSettings.from_config(config).pass_bar,
+            local_context=local_context,
+            founder_spot_check=spot_check_summary(findings),
         )
     )
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, quality_path, as_of=context.as_of, pull_date=context.pull_date)
     reconciliation_csv = _report_reconciliation(config, context)
+    plausibility = pl.read_parquet(config.layout.joined_table(FAC_PLAUSIBILITY))
+    plausibility_csv = write_plausibility_csv(plausibility, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, plausibility_csv, as_of=context.as_of, pull_date=context.pull_date)
     return Delivered(
         target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
-        reconciliation_csv=reconciliation_csv,
+        reconciliation_csv=reconciliation_csv, fac_plausibility_csv=plausibility_csv,
+        spot_check=spot_check,
     )
 
 
