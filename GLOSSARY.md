@@ -44,6 +44,14 @@ _Avoid_: Unmatched (for this case), unknown Host
 The name of the rule that decided a Grant's Host link (e.g. `uei_confirmed`); accuracy is measured and reported per case label.
 _Avoid_: Confidence, score
 
+**Local context**:
+The institution type, enrollment, and district child-poverty rate attached to a Grant through its Host institution, as one latest snapshot stamped with its data year; it describes where the Host sits, not who the project serves.
+_Avoid_: Demographics, service area
+
+**Campus district**:
+The geographic school district a college Host's campus lies in; its poverty rate is shown for college-hosted Grants and labelled as the campus's district, never as the served schools'.
+_Avoid_: Target district, service district
+
 ## Grant status
 
 **Funding status**:
