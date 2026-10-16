@@ -69,3 +69,73 @@ def test_clean_reads_only_files_in_the_manifest_and_makes_no_request(project, tm
         ("P047A220187", 2024, "Upward Bound", "AL", 67),
         ("P047A221553", 2024, "Upward Bound", "AK", 60),
     ]
+
+
+def ub_pdf(rows=UB_FY2024, **kw):
+    return pdf_bytes(trio_pdf_lines(2024, "Upward Bound(UB)", rows, **kw))
+
+
+def test_a_filed_list_that_fails_its_checksum_stops_the_run(project):
+    lists = raw_dir(project)
+    row = file_list(lists, "ub_84047A", "2024", "fy-2024-ub-awards.pdf", ub_pdf())
+    write_manifest(lists, [row])
+    stored = lists / row["stored_path"].rsplit("/", 1)[1]
+    stored.write_bytes(stored.read_bytes().replace(b"309,505", b"309,506"))
+
+    result = project.topo("clean", "ed_grantee_lists", expect_exit=2)
+
+    assert "checksum" in result.output
+
+
+def test_a_filed_list_absent_from_the_folder_stops_the_run(project):
+    lists = raw_dir(project)
+    row = file_list(lists, "ub_84047A", "2024", "fy-2024-ub-awards.pdf", ub_pdf())
+    write_manifest(lists, [row])
+    (lists / row["stored_path"].rsplit("/", 1)[1]).unlink()
+
+    result = project.topo("clean", "ed_grantee_lists", expect_exit=2)
+
+    assert "absent" in result.output
+
+
+def test_ed_lists_cannot_be_pulled(project, no_network):
+    result = project.topo("pull", "ed_grantee_lists", "--pull-date", "2026-10-15", expect_exit=2)
+
+    assert "cannot be pulled" in result.output
+
+
+def test_a_name_wrapped_off_its_pdf_row_is_the_line_above_plus_the_line_below(project):
+    lines = trio_pdf_lines(2024, "Upward Bound(UB)", [("P047A221610", "", "WI", 110, 549735)])
+    row_at = next(i for i, ln in enumerate(lines) if ln.startswith("P047A221610"))
+    lines[row_at:row_at + 1] = [
+        "Board of Regents of the University of Wisconsin System/", "P047A221610 WI 110 $549,735", "Milwaukee",
+    ]
+    lists = raw_dir(project)
+    write_manifest(lists, [file_list(lists, "ub_84047A", "2024", "ub.pdf", pdf_bytes(lines))])
+
+    project.topo("clean", "ed_grantee_lists")
+
+    (row,) = cleaned(project, "ed_trio_list_rows").to_dicts()
+    assert row["recipient_campus"] == "Board of Regents of the University of Wisconsin System/ Milwaukee"
+    assert row["ed_recipient"] == "Board of Regents of the University of Wisconsin System"
+    assert row["ed_campus"] == "Milwaukee"
+
+
+def test_a_list_whose_rows_disagree_with_its_stated_total_stops_the_run(project):
+    lists = raw_dir(project)
+    write_manifest(lists, [file_list(lists, "ub_84047A", "2024", "ub.pdf", ub_pdf(total_projects=3))])
+
+    result = project.topo("clean", "ed_grantee_lists", expect_exit=2)
+
+    assert "states 3 projects" in result.output
+
+
+def test_cleaned_output_passes_its_schema_check(project, tmp_path):
+    lists = raw_dir(project)
+    bad_state = [("P042A201384", "University of Alaska/ Anchorage", "Alaska", 160, 282500, "Regular")]
+    write_manifest(lists, [file_list(lists, "sss_84042A", "2023", "sss.xlsx",
+                                     trio_xlsx_bytes(2023, "Student Support Services(SSS)", bad_state, tmp_path))])
+
+    result = project.topo("clean", "ed_grantee_lists", expect_exit=2)
+
+    assert "failed its schema check" in result.output
