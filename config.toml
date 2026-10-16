@@ -21,6 +21,19 @@ start_fy = 2021
 # Reconciliation (#14): within 1% or $1M, whichever is larger.
 reconciliation_relative = 0.01
 reconciliation_absolute_usd = 1_000_000
+# ASSUMPTION: ED per-program award counts vs USAspending Grants funded, within 1%.
+# ED grantee lists are compared exactly (no tolerance).
+reconciliation_count_relative = 0.01
+
+[reconciliation]
+# A fiscal year less than [target_list] provisional_lag_days past its end on the
+# Pull date that does not reconcile is `provisional`, not failed (#14).
+# ASSUMPTION (#14): ED-list evidence for unfunded Budget periods (on an ED list
+# with funding, no USAspending action) is "large" at 5% or more overall, or over
+# 10% in any Program x FY; the one-pager must then say unfunded status partly
+# reflects USAspending reporting gaps. Evidence never changes Funding status.
+evidence_large_share_overall = 0.05
+evidence_large_share_program_fy = 0.10
 
 [usaspending]
 # Award Data Archive fiscal years fetched by `topo pull usaspending`
@@ -115,6 +128,18 @@ directory_from_year = 2015
 # supervisory union, 4 regional education service agency, 5 state agency,
 # 7 independent charter agency (the host-linking prototype's set).
 agency_types = [1, 2, 4, 5, 7]
+
+[renewal_timing]
+# Renewal timing (#40). The Predicted due date of a Program's next competition is
+# the prior Cohort's published deadline (data/curated/<deadline_table>, each row
+# cited) plus `cycle_months`. A Program whose observed gap between Cohort starts
+# isn't `cycle_months` is marked "timing not predicted".
+cycle_months = 60
+# Re-competing soon: the Predicted due date is at most this many months after the
+# As-of date (and the latest readable Funding status is continued or funded late).
+# ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
+lead_months = 12
+deadline_table = "deadlines.csv"
 
 [spot_check]
 # Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
