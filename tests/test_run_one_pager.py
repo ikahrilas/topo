@@ -11,6 +11,7 @@ import re
 
 import pdfplumber
 from support.markdown import prose, sections, table
+from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
 from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
@@ -104,3 +105,45 @@ def test_once_fy2026_is_90_days_past_its_end_it_is_no_longer_provisional(project
     header = list(table(text, "What's out there")[0])
     assert header[-1] == "FY2026"
     assert "provisional" not in prose(text, "How far to trust this")
+
+
+DISRUPTED = [
+    *grant("P047A220845", 2022, 5),  # continued throughout
+    *grant("P047A220846", 2022, 3),  # Budget period starting 2025-09-01 unfunded
+    *grant("P047A220847", 2022, 3),  # 2025-09-01 period funded late, 2026-09-01 period continued (since restored)
+    action("P047A220847", 4, "2025-10-05", 100_000, ("2025-09-01", "2026-08-31")),
+    action("P047A220847", 5, "2026-05-15", 100_000, ("2026-09-01", "2027-08-31")),
+    *grant("P047A220848", 2022, 4),  # 2025-09-01 period funded, then reversed
+    action("P047A220848", 5, "2025-11-01", -100_000, ("2025-09-01", "2026-08-31")),
+]
+
+
+def test_whats_changed_counts_disrupted_grants_by_funding_pattern_with_the_2024_baseline(project):
+    write_actions(project.raw_usaspending, PULL, DISRUPTED)
+
+    project.topo("run", "--as-of", PULL)
+
+    text = one_pager(project)
+    counts = {r["Funding pattern"]: r["Grants"] for r in table(text, "What's changed since 2025")}
+    assert counts == {"unfunded": "1", "funded late": "1", "reversed": "1"}
+    words = prose(text, "What's changed since 2025")
+    assert "3 Grants" in words and "1 since restored" in words
+    assert "not proof of a policy cut" in words  # ADR 0001: a funding pattern, never a cause
+    assert "95 Grants" in words and "2024" in words
+    assert "never a cause" in marked(words, "pattern", text)
+    assert "reporting gaps" not in text  # no ED-list evidence: the trigger is not met
+
+
+def test_the_reporting_gap_sentence_appears_only_when_ed_lists_fund_enough_unfunded_budget_periods(project):
+    write_actions(project.raw_usaspending, PULL, DISRUPTED)
+    lists = project.root / "data" / "raw" / "ed_grantee_lists"
+    write_manifest(lists, [
+        file_list(lists, "ub_84047A", "2025", "ub2025.pdf", pdf_bytes(trio_pdf_lines(2025, "Upward Bound", [
+            ("P047A220846", "University of South Florida/ Tampa", "FL", 60, 100_000),
+        ]))),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    words = prose(one_pager(project), "What's changed since 2025")
+    assert "Unfunded status may partly reflect USAspending reporting gaps: 1 of 1 unfunded Budget periods" in words

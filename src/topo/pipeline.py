@@ -62,7 +62,7 @@ from topo.outputs.target_list import (
 )
 from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
-from topo.outputs.one_pager import OnePagerFiles, OnePagerInputs, render_one_pager, write_one_pager
+from topo.outputs.one_pager import OnePagerFiles, OnePagerInputs, OnePagerSettings, render_one_pager, write_one_pager
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
 from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
@@ -458,6 +458,7 @@ def report(config: Config) -> Delivered:
 def _report_one_pager(
     config: Config, context: RunContext, universe: GrantUniverse, settings: TargetListSettings
 ) -> OnePagerFiles:
+    windows = ReadWindows.from_config(config)
     text = render_one_pager(OnePagerInputs(
         pull_date=context.pull_date,
         as_of=context.as_of,
@@ -467,6 +468,11 @@ def _report_one_pager(
         provisional_fys=provisional_fiscal_years(context.window, context.pull_date, settings.provisional_lag_days),
         provisional_lag_days=settings.provisional_lag_days,
         awaited=awaited_notes(universe, settings),
+        funding_periods=pl.read_parquet(config.layout.joined_table(FUNDING_STATUS)),
+        grant_funding=pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS)),
+        disruption_window=(windows.disruption_start, windows.disruption_end),
+        evidence=pl.read_parquet(config.layout.joined_table(UNFUNDED_ED_LIST_EVIDENCE)),
+        settings=OnePagerSettings.from_section(config.section("one_pager")),
     ))
     files = write_one_pager(text, config.layout.output, context.pull_date)
     for path in (files.markdown, files.pdf):

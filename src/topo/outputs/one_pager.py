@@ -12,9 +12,11 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 
+from topo.domain.funding_status import DISRUPTION_RESTORED, FUNDED_LATE, REVERSED, UNFUNDED
 from topo.domain.programs import PROGRAMS
 from topo.fiscal import ReportingWindow, fy_label
 from topo.outputs.delivery import delivery_paths, write_new
@@ -25,8 +27,28 @@ STEM = "one_pager"
 MAX_TRUST_ITEMS = 8
 ALL_PROGRAMS = "All Programs"
 
+DISRUPTION_PATTERNS = (UNFUNDED, FUNDED_LATE, REVERSED)
+
 # Trust item keys
 PROVISIONAL = "provisional"
+PATTERN = "pattern"
+
+
+@dataclass(frozen=True)
+class OnePagerSettings:
+    """`[one_pager]` in config.toml: the normal-year baseline for the disruption counts."""
+
+    baseline_unfunded_grants: int = 95
+    baseline_year: int = 2024
+    baseline_source: str = "docs/research/status-signals-2025-26.md"
+
+    @classmethod
+    def from_section(cls, section: dict[str, Any]) -> "OnePagerSettings":
+        return cls(
+            baseline_unfunded_grants=int(section["baseline_unfunded_grants"]),
+            baseline_year=int(section["baseline_year"]),
+            baseline_source=str(section["baseline_source"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -39,6 +61,11 @@ class OnePagerInputs:
     provisional_fys: list[int] = field(default_factory=list)  # window FYs still inside the reporting lag
     provisional_lag_days: int = 90
     awaited: dict[str, str] = field(default_factory=dict)  # Program -> "FY2026 new awards not yet reported"
+    funding_periods: pl.DataFrame | None = None  # joined funding_status: (fain, Budget period) with `disrupted`
+    grant_funding: pl.DataFrame | None = None  # joined grant_funding_status: one row per FAIN with `disruption`
+    disruption_window: tuple[dt.date, dt.date] = (dt.date(2025, 5, 1), dt.date(2026, 9, 30))
+    evidence: pl.DataFrame | None = None  # joined unfunded_ed_list_evidence (with the `large` trigger)
+    settings: OnePagerSettings = OnePagerSettings()
 
 
 @dataclass(frozen=True)
@@ -81,6 +108,10 @@ def _trust_items(inputs: OnePagerInputs) -> TrustItems:
             f"{years} is provisional (as of {inputs.pull_date.isoformat()}; reporting lag): USAspending is still "
             f"catching up until {inputs.provisional_lag_days} days after the year ends{awaited}."
         )))
+    items.append((PATTERN, (
+        "Funding status is a pattern read from funding actions, never a cause: gaps are routine, a court record "
+        "names only a few Grants, and the counts are not proof of a policy cut."
+    )))
     return TrustItems(items)
 
 
@@ -113,6 +144,39 @@ def _whats_out_there(inputs: OnePagerInputs, trust: TrustItems) -> list[str]:
     return out
 
 
+def _whats_changed(inputs: OnePagerInputs, trust: TrustItems) -> list[str]:
+    periods = inputs.funding_periods
+    disrupted = periods.filter(pl.col("disrupted")) if periods is not None else pl.DataFrame(
+        schema={"fain": pl.String, "funding_status": pl.String})
+    grants = disrupted["fain"].n_unique()
+    restored = 0 if inputs.grant_funding is None else inputs.grant_funding.filter(
+        pl.col("disruption") == DISRUPTION_RESTORED).height
+    start, end = inputs.disruption_window
+    settings = inputs.settings
+    out = [
+        f"{grants} Grants {trust.marker(PATTERN, 'pattern')} had a Budget period starting {start.isoformat()} to "
+        f"{end.isoformat()} that was unfunded, funded late or reversed; {restored} since restored. This is a "
+        "funding pattern read from USAspending, not proof of a policy cut or any other cause. For a baseline, "
+        f"{settings.baseline_unfunded_grants} Grants went unfunded in normal {settings.baseline_year} "
+        f"({settings.baseline_source}).",
+        "",
+    ]
+    out += _table(
+        ["Funding pattern", "Grants"],
+        [[p, disrupted.filter(pl.col("funding_status") == p)["fain"].n_unique()] for p in DISRUPTION_PATTERNS],
+    )
+    evidence = inputs.evidence
+    if evidence is not None and evidence["large"].any():
+        overall = evidence.filter(pl.col("fiscal_year").is_null()).row(0, named=True)
+        out += [
+            "",
+            "Unfunded status may partly reflect USAspending reporting gaps: "
+            f"{overall['with_ed_list_evidence']} of {overall['unfunded_budget_periods']} unfunded Budget periods "
+            f"({100 * (overall['share'] or 0):.0f}%) show funding on an ED grantee list.",
+        ]
+    return out
+
+
 def _table(header: list[str], rows: list[list]) -> list[str]:
     def cell(value) -> str:
         return "" if value is None else str(value).replace("|", "/")
@@ -133,6 +197,8 @@ def render_one_pager(inputs: OnePagerInputs) -> str:
         *_whats_out_there(inputs, trust),
         "",
         "## What's changed since 2025",
+        "",
+        *_whats_changed(inputs, trust),
         "",
         "## What's coming up",
         "",
