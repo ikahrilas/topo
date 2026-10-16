@@ -1,0 +1,116 @@
+transactions 4391  grants 4315  ipeds units 6515  leas 18818  ed rows 3441  gold 160
+
+== outcomes over all Grants
+shape: (4, 3)
+┌────────────────┬──────┬──────┐
+│ outcome        ┆ len  ┆ pct  │
+│ ---            ┆ ---  ┆ ---  │
+│ str            ┆ u32  ┆ f64  │
+╞════════════════╪══════╪══════╡
+│ matched        ┆ 3688 ┆ 85.5 │
+│ no_single_host ┆ 309  ┆ 7.2  │
+│ review         ┆ 264  ┆ 6.1  │
+│ unmatched      ┆ 54   ┆ 1.3  │
+└────────────────┴──────┴──────┘
+
+== cases
+shape: (36, 3)
+┌────────────────┬────────────────────────────────────────────────┬──────┐
+│ outcome        ┆ case                                           ┆ len  │
+│ ---            ┆ ---                                            ┆ ---  │
+│ str            ┆ str                                            ┆ u32  │
+╞════════════════╪════════════════════════════════════════════════╪══════╡
+│ matched        ┆ uei_confirmed                                  ┆ 2785 │
+│ matched        ┆ campus_text_confirmed                          ┆ 417  │
+│ matched        ┆ campus_named                                   ┆ 113  │
+│ matched        ┆ campus_text_picks_one                          ┆ 109  │
+│ matched        ┆ uei_only                                       ┆ 92   │
+│ matched        ┆ district_is_recipient                          ┆ 34   │
+│ matched        ┆ name_and_address                               ┆ 28   │
+│ matched        ┆ district_named_in_desc                         ┆ 27   │
+│ matched        ┆ ed_list_and_desc_agree                         ┆ 23   │
+│ matched        ┆ campus_named_overrides                         ┆ 23   │
+│ matched        ┆ uei_vs_name_conflict                           ┆ 12   │
+│ matched        ┆ campus_named+followed_ipeds_merge              ┆ 10   │
+│ matched        ┆ uei_confirmed+followed_ipeds_merge             ┆ 10   │
+│ matched        ┆ campus_named_overrides+followed_ipeds_merge    ┆ 3    │
+│ matched        ┆ campus_text_confirmed+followed_ipeds_merge     ┆ 2    │
+│ no_single_host ┆ nonprofit_no_site_named                        ┆ 185  │
+│ no_single_host ┆ gearup_partnership_no_district_named           ┆ 82   │
+│ no_single_host ┆ gearup_state                                   ┆ 38   │
+│ no_single_host ┆ state_agency_no_site_named                     ┆ 4    │
+│ review         ┆ city_named_with_one_district                   ┆ 70   │
+│ review         ┆ several_campuses_named                         ┆ 57   │
+│ review         ┆ system_campus_by_address                       ┆ 38   │
+│ review         ┆ school_named_needs_school_lookup               ┆ 35   │
+│ review         ┆ campus_text_overrides_uei                      ┆ 19   │
+│ review         ┆ district_weak_signal                           ┆ 11   │
+│ review         ┆ system_campus_not_stated                       ┆ 9    │
+│ review         ┆ single_weak_signal:desc                        ┆ 6    │
+│ review         ┆ uei_only_non_college                           ┆ 5    │
+│ review         ┆ single_weak_signal:ed_list                     ┆ 5    │
+│ review         ┆ only_candidate_is_system_office                ┆ 3    │
+│ review         ┆ campus_text_overrides_uei+followed_ipeds_merge ┆ 3    │
+│ review         ┆ single_weak_signal:name                        ┆ 2    │
+│ review         ┆ single_weak_signal:desc+ed_list                ┆ 1    │
+│ unmatched      ┆ no_candidate_ihe                               ┆ 35   │
+│ unmatched      ┆ no_candidate_lea                               ┆ 16   │
+│ unmatched      ┆ no_candidate_aux                               ┆ 3    │
+└────────────────┴────────────────────────────────────────────────┴──────┘
+
+== ED list coverage: TRIO Grants with an ED FY2024 row
+3411 of 4152; ED rows not in USAspending FY2024: 30
+
+== vs hand labels (n=160, unweighted)
+shape: (7, 3)
+┌────────────────┬───────────┬─────┐
+│ outcome        ┆ verdict   ┆ len │
+│ ---            ┆ ---       ┆ --- │
+│ str            ┆ str       ┆ u32 │
+╞════════════════╪═══════════╪═════╡
+│ matched        ┆ correct   ┆ 100 │
+│ no_single_host ┆ correct   ┆ 40  │
+│ no_single_host ┆ wrong     ┆ 2   │
+│ review         ┆ correct   ┆ 11  │
+│ review         ┆ no_answer ┆ 4   │
+│ review         ┆ wrong     ┆ 1   │
+│ unmatched      ┆ no_answer ┆ 2   │
+└────────────────┴───────────┴─────┘
+shape: (6, 4)
+┌───────────┬───────────┬─────────┬───────┐
+│ gold_type ┆ no_answer ┆ correct ┆ wrong │
+│ ---       ┆ ---       ┆ ---     ┆ ---   │
+│ str       ┆ u32       ┆ u32     ┆ u32   │
+╞═══════════╪═══════════╪═════════╪═══════╡
+│ AUX       ┆ 0         ┆ 16      ┆ 0     │
+│ LEA       ┆ 1         ┆ 15      ┆ 0     │
+│ NP        ┆ 4         ┆ 33      ┆ 2     │
+│ SC        ┆ 0         ┆ 46      ┆ 0     │
+│ STATE     ┆ 1         ┆ 11      ┆ 0     │
+│ SYS       ┆ 0         ┆ 30      ┆ 1     │
+└───────────┴───────────┴─────────┴───────┘
+
+== auto-accepted but wrong
+shape: (2, 7)
+┌─────────────┬───────────┬─────────────────┬────────────────┬─────────┬───────────┬───────────────┐
+│ fain        ┆ gold_type ┆ recipient_name  ┆ case           ┆ host_id ┆ host_name ┆ gold_host     │
+│ ---         ┆ ---       ┆ ---             ┆ ---            ┆ ---     ┆ ---       ┆ ---           │
+│ str         ┆ str       ┆ str             ┆ str            ┆ str     ┆ str       ┆ str           │
+╞═════════════╪═══════════╪═════════════════╪════════════════╪═════════╪═══════════╪═══════════════╡
+│ P044A210246 ┆ NP        ┆ FAMILY-CENTERED ┆ nonprofit_no_s ┆ null    ┆ null      ┆ LEAID 1738970 │
+│             ┆           ┆ EDUCATION       ┆ ite_named      ┆         ┆           ┆               │
+│ P047A221014 ┆ NP        ┆ FAMILY-CENTERED ┆ nonprofit_no_s ┆ null    ┆ null      ┆ LEAID 1709930 │
+│             ┆           ┆ EDUCATION       ┆ ite_named      ┆         ┆           ┆               │
+└─────────────┴───────────┴─────────────────┴────────────────┴─────────┴───────────┴───────────────┘
+
+== sent to review with a wrong suggestion
+shape: (1, 7)
+┌─────────────┬───────────┬───────────────┬───────────────┬─────────┬───────────────┬──────────────┐
+│ fain        ┆ gold_type ┆ recipient_nam ┆ case          ┆ host_id ┆ host_name     ┆ gold_host    │
+│ ---         ┆ ---       ┆ e             ┆ ---           ┆ ---     ┆ ---           ┆ ---          │
+│ str         ┆ str       ┆ ---           ┆ str           ┆ str     ┆ str           ┆ str          │
+│             ┆           ┆ str           ┆               ┆         ┆               ┆              │
+╞═════════════╪═══════════╪═══════════════╪═══════════════╪═════════╪═══════════════╪══════════════╡
+│ P047A171469 ┆ SYS       ┆ MIAMI         ┆ system_campus ┆ 204024  ┆ Miami Univers ┆ UNITID 20400 │
+│             ┆           ┆ UNIVERSITY    ┆ _by_address   ┆         ┆ ity-Oxford    ┆ 6/204015     │
+└─────────────┴───────────┴───────────────┴───────────────┴─────────┴───────────────┴──────────────┘

@@ -1,0 +1,8 @@
+# secrets
+.env
+
+# raw pulled data: keep only the ed.gov manifest (layout provisional, see #15)
+data/raw/*
+!data/raw/ed_grantee_lists/
+data/raw/ed_grantee_lists/*
+!data/raw/ed_grantee_lists/manifest.csv
