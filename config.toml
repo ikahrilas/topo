@@ -40,3 +40,14 @@ directory_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_direct
 enrollment_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_fall-enrollment-race_2024.csv"
 # Directory years kept: names since 2015 cover former names; UEIs start in 2022.
 directory_from_year = 2015
+
+[ccd]
+# Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
+# fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.
+lea_directory_url = "https://educationdata.urban.org/csv/ccd/school-districts_lea_directory.csv"
+# District years kept: names since 2015 cover renamed districts.
+directory_from_year = 2015
+# CCD agency types kept as possible district Hosts: 1 regular, 2 component of a
+# supervisory union, 4 regional education service agency, 5 state agency,
+# 7 independent charter agency (the host-linking prototype's set).
+agency_types = [1, 2, 4, 5, 7]
