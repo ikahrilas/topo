@@ -17,6 +17,7 @@ import json
 import tempfile
 import urllib.request
 import zipfile
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,7 @@ from pathlib import Path
 import pandera.polars as pa
 import polars as pl
 
-from topo import provenance
+from topo import provenance, run_log
 from topo.config import Config, Layout
 from topo.domain.programs import LISTINGS
 from topo.fiscal import fiscal_year
@@ -32,6 +33,7 @@ from topo.guards import StructuralBreak, check_schema, check_unique
 
 SOURCE = "usaspending"
 CLEANED_TABLE = "usaspending_actions"
+DROP_NOT_A_TARGET_LISTING = "not_a_trio_gear_up_listing"
 
 API = "https://api.usaspending.gov/api/v2"
 LICENCE_CITATION = (
@@ -213,11 +215,20 @@ def raw_files(layout: Layout, pull_date: dt.date) -> list[Path]:
     return sorted(p for p in folder.iterdir() if p.suffix.lower() in {".csv", ".zip"})
 
 
-def _read_csv(path: Path, label: str) -> pl.DataFrame:
+def _read_csv(path: Path, label: str, tally: Counter) -> pl.DataFrame:
     header = pl.read_csv(path, n_rows=0, infer_schema=False).columns
     missing = sorted(set(KEEP_COLUMNS) - set(header))
     if missing:
         raise StructuralBreak(f"{label} lacks archive columns: {', '.join(missing)}")
+    # Counted in their own pass so the run log's row balance is a real check.
+    rows_in, off_listing = (
+        pl.scan_csv(path, infer_schema=False)
+        .select(pl.len(), (~pl.col("cfda_number").is_in(LISTINGS)).fill_null(True).sum())
+        .collect()
+        .row(0)
+    )
+    tally["rows_in"] += rows_in
+    tally[DROP_NOT_A_TARGET_LISTING] += off_listing
     return (
         pl.scan_csv(path, infer_schema=False)
         .select(list(KEEP_COLUMNS))
@@ -227,15 +238,15 @@ def _read_csv(path: Path, label: str) -> pl.DataFrame:
     )
 
 
-def _read_raw_file(path: Path) -> pl.DataFrame:
+def _read_raw_file(path: Path, tally: Counter) -> pl.DataFrame:
     if path.suffix.lower() == ".csv":
-        return _read_csv(path, path.name)
+        return _read_csv(path, path.name, tally)
     frames = []
     with zipfile.ZipFile(path) as archive, tempfile.TemporaryDirectory() as tmp:
         for member in archive.namelist():
             if member.lower().endswith(".csv"):
                 extracted = Path(archive.extract(member, tmp))
-                frames.append(_read_csv(extracted, f"{path.name}:{member}"))
+                frames.append(_read_csv(extracted, f"{path.name}:{member}", tally))
     return pl.concat(frames) if frames else pl.DataFrame()
 
 
@@ -248,8 +259,9 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     layout = config.layout
     pull_date = pull_date or latest_pull_date(layout)
     files = raw_files(layout, pull_date)
-    provenance.record_raw_inputs(config, SOURCE, files)
-    frames = [_read_raw_file(p) for p in files]
+    input_hash = provenance.record_raw_inputs(config, SOURCE, files)
+    tally: Counter = Counter()
+    frames = [_read_raw_file(p, tally) for p in files]
     frames = [f for f in frames if f.height]
     if frames:
         raw = pl.concat(frames)
@@ -278,6 +290,11 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     )
     check_unique(actions, "transaction_key", "USAspending actions")
     actions = check_schema(UsaspendingActions, actions, "USAspending actions")
+    run_log.record(
+        config, layer="clean", source=SOURCE, rows_in=tally["rows_in"], rows_out=actions.height,
+        drops={DROP_NOT_A_TARGET_LISTING: tally[DROP_NOT_A_TARGET_LISTING]}, pull_date=pull_date,
+        input_hash=input_hash,
+    )
     layout.cleaned.mkdir(parents=True, exist_ok=True)
     actions.write_parquet(layout.cleaned_table(CLEANED_TABLE))
     return actions
