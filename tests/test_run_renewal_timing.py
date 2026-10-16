@@ -147,19 +147,19 @@ def test_re_competing_soon_holds_until_a_new_cohorts_fains_appear(project, as_of
 
 
 def test_a_program_whose_observed_gap_is_not_60_months_shows_timing_not_predicted(project):
-    write_deadlines(project, "McNair,2021,2021-03-01,Notice inviting applications (FY2021),,\n")
+    write_deadlines(project, "McNair,2022,2022-04-25,Notice inviting applications (FY2022),,\n")
     write_actions(project.raw_usaspending, PULL, [
-        *grant("P217A170001", 2017, 5), *grant("P217A210001", 2021, 5),  # Cohorts FY2017 and FY2021: 48 months
+        *grant("P217A180001", 2018, 5), *grant("P217A220001", 2022, 5),  # Cohorts FY2018 and FY2022: 48 months
     ])
 
     project.topo("run", "--as-of", PULL)
 
-    mcnair = rows_by_fain(project)["P217A210001"]
+    mcnair = rows_by_fain(project)["P217A220001"]
     assert mcnair["Renewal timing"] == "timing not predicted"
     assert (mcnair["Predicted due date"], mcnair["Evidence tier"], mcnair["Re-competing soon"]) == ("", "", "no")
     gaps = pl.read_parquet(project.root / "data/joined/cohort_timing.parquet")
     assert gaps.select("program", "cohort_fy", "observed_gap_months").rows() == [
-        ("McNair", 2017, None), ("McNair", 2021, 48),
+        ("McNair", 2018, None), ("McNair", 2022, 48),
     ]
 
 
@@ -186,7 +186,7 @@ def test_gear_up_rows_say_competes_most_years_and_carry_an_end_date_fact(project
     write_deadlines(project, UB_FY2022)
     write_actions(project.raw_usaspending, PULL, [
         *grant("P334A210001", 2021, 6),  # from 2021-09-01, six Budget periods: ends 2027-08-31
-        *grant("P334S190002", 2019, 6),  # ended 2025-08-31
+        *grant("P334S230002", 2023, 4),  # from 2023-09-01, six Budget periods: ends 2029-08-31
     ])
 
     project.topo("run", "--as-of", PULL)
@@ -196,4 +196,5 @@ def test_gear_up_rows_say_competes_most_years_and_carry_an_end_date_fact(project
     assert partnership["Renewal timing"] == "competes most years; timing not predicted"
     assert partnership["End date"] == "expires within 12 months (end date 2027-08-31)"
     assert (partnership["Predicted due date"], partnership["Re-competing soon"]) == ("", "no")
-    assert rows["P334S190002"]["End date"] == ""
+    assert rows["P334S230002"]["Renewal timing"] == "competes most years; timing not predicted"
+    assert rows["P334S230002"]["End date"] == ""

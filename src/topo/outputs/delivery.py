@@ -23,6 +23,16 @@ def delivery_path(output_dir: Path, stem: str, pull_date: dt.date, ext: str) -> 
     return candidate
 
 
+def delivery_paths(output_dir: Path, stem: str, pull_date: dt.date, exts: tuple[str, ...]) -> dict[str, Path]:
+    """Paths for files delivered together (e.g. XLSX + CSV): one version suffix, free for every extension."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base = f"{stem}_{pull_date.isoformat()}"
+    suffix, version = "", 2
+    while any((output_dir / f"{base}{suffix}.{ext}").exists() for ext in exts):
+        suffix, version = f"_v{version}", version + 1
+    return {ext: output_dir / f"{base}{suffix}.{ext}" for ext in exts}
+
+
 def write_new(path: Path, data: bytes) -> None:
     """Write bytes to a path that must not exist yet (exclusive create)."""
     with path.open("xb") as f:

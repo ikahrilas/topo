@@ -64,11 +64,36 @@ disruption_window_end = 2026-09-30
 TRIO = 5
 "GEAR UP" = 6
 
+[host_linking]
+# Case-label gating on the frozen answer key (ADR 0002). A label that decides
+# automatically is auto-accepted at >= auto_accept_accuracy with at least
+# auto_accept_min_checks checks, demoted to review below the bar, and reported
+# "unverified" (its rule outcome kept) under the minimum. ASSUMPTION: 95% / 10.
+auto_accept_accuracy = 0.95
+auto_accept_min_checks = 10
+# Once the answer key in data/curated/host_answer_key.csv is labelled, pin its
+# sha256 here; any later edit to the frozen key then stops the run. "" = not pinned.
+answer_key_sha256 = ""
+
 [api_keys]
 # Environment variables holding API keys (never the keys themselves). Set them in
 # the shell or in a .env file beside this one; .env is git-ignored. Only the
 # Census API takes a key.
 census = "CENSUS_API_KEY"
+
+[target_list]
+# Priority tier 1: new Grants within this many months of their award (#26).
+new_award_months = 3
+# A fiscal year less than this many days past its end on the Pull date is labelled
+# "provisional (as of <Pull date>; reporting lag)".
+provisional_lag_days = 90
+# Competitions awarded but whose new FAINs (`<FAIN prefix><yy>`, e.g. P044A26) are
+# not yet in USAspending. Each Program's rows carry "<FY> new awards not yet
+# reported" until one such FAIN appears. Source: docs/research/apr-data-and-fy2026-awards.md (Q2).
+awaited_cohorts = [
+    { program = "Talent Search", fy = 2026 },
+    { program = "Educational Opportunity Centers", fy = 2026 },
+]
 
 [lookback]
 # Lookback (#39): Grants whose project period ended before the reporting window
