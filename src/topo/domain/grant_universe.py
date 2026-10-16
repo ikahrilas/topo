@@ -24,7 +24,7 @@ import pandera.polars as pa
 import polars as pl
 
 from topo.domain.programs import PROGRAMS
-from topo.fiscal import ReportingWindow
+from topo.fiscal import ReportingWindow, fy_start
 from topo.guards import check_schema, check_unique
 
 
@@ -101,23 +101,21 @@ _PROGRAM_TABLE = pl.DataFrame(
 )
 
 
-def build_grant_universe(actions: pl.DataFrame, window: ReportingWindow) -> GrantUniverse:
-    """Select, label and roll up TRIO/GEAR UP funding actions into Grants."""
-    labelled = actions.with_columns(pl.col("fain").str.slice(0, 5).alias("fain_prefix")).join(
+def _label(actions: pl.DataFrame) -> pl.DataFrame:
+    """Every action with its Program (null when listing and FAIN prefix name none)."""
+    return actions.with_columns(pl.col("fain").str.slice(0, 5).alias("fain_prefix")).join(
         _PROGRAM_TABLE, on=["listing", "fain_prefix"], how="left"
     )
-    exceptions = labelled.filter(pl.col("program").is_null()).select(
-        "transaction_key", "fain", "listing", "awarding_agency_code", "action_date", "obligation",
-        pl.lit(EXCEPTION_UNKNOWN_FAIN_PREFIX).alias("reason"),
-    )
-    selected = labelled.filter(pl.col("program").is_not_null())
 
+
+def _per_award(selected: pl.DataFrame) -> pl.DataFrame:
+    """One row per award: Program, Recipient (from the latest action) and project period."""
     # The latest action names the Recipient (name drift over a project period is common).
     latest_first = selected.sort(
         "action_date", pl.col("modification_number").cast(pl.Int64, strict=False), descending=True,
         nulls_last=True,
     )
-    per_award = (
+    return (
         latest_first.group_by("award_key", "fain", "program", "program_family", "listing", maintain_order=True)
         .agg(
             pl.col("recipient_name").drop_nulls().first(),
@@ -129,6 +127,17 @@ def build_grant_universe(actions: pl.DataFrame, window: ReportingWindow) -> Gran
             pl.col("pull_date").max(),
         )
     )
+
+
+def build_grant_universe(actions: pl.DataFrame, window: ReportingWindow) -> GrantUniverse:
+    """Select, label and roll up TRIO/GEAR UP funding actions into Grants."""
+    labelled = _label(actions)
+    exceptions = labelled.filter(pl.col("program").is_null()).select(
+        "transaction_key", "fain", "listing", "awarding_agency_code", "action_date", "obligation",
+        pl.lit(EXCEPTION_UNKNOWN_FAIN_PREFIX).alias("reason"),
+    )
+    selected = labelled.filter(pl.col("program").is_not_null())
+    per_award = _per_award(selected)
     in_window = per_award.filter(
         (pl.col("project_start") <= window.end) & (pl.col("project_end") >= window.start)
     )
@@ -155,3 +164,40 @@ def build_grant_universe(actions: pl.DataFrame, window: ReportingWindow) -> Gran
         "FY obligations",
     )
     return GrantUniverse(grants, grant_actions, fy_obligations, exceptions, window)
+
+
+@dataclass(frozen=True)
+class Lookback:
+    """Grants whose project period ended before the reporting window but not before the lookback horizon.
+
+    Read only for Succession links and Cohort starts: they get no amount
+    columns, no target-list row and no reconciliation row.
+    """
+
+    grants: pl.DataFrame  # Grants schema
+    grant_actions: pl.DataFrame  # GrantActions schema
+
+
+def build_lookback(
+    actions: pl.DataFrame, window: ReportingWindow, from_fy_by_family: dict[str, int]
+) -> Lookback:
+    """Lookback Grants: project period inside [lookback horizon of its Program family, window start)."""
+    selected = _label(actions).filter(pl.col("program").is_not_null())
+    horizon = pl.col("program_family").replace_strict(
+        {family: fy_start(fy) for family, fy in from_fy_by_family.items()}, return_dtype=pl.Date
+    )
+    lookback = _per_award(selected).filter(
+        (pl.col("project_end") < window.start) & (pl.col("project_end") >= horizon)
+    )
+    check_unique(lookback, "fain", "Lookback Grant table")
+    grants = check_schema(
+        Grants, lookback.select(list(Grants.to_schema().columns)).sort("fain"), "Lookback Grant table"
+    )
+    grant_actions = check_schema(
+        GrantActions,
+        selected.join(grants.select("fain"), on="fain", how="semi")
+        .select(list(GrantActions.to_schema().columns))
+        .sort("fain", "action_date", "transaction_key"),
+        "Lookback Grant actions",
+    )
+    return Lookback(grants, grant_actions)

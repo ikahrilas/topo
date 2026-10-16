@@ -25,7 +25,7 @@ reconciliation_absolute_usd = 1_000_000
 [usaspending]
 # Award Data Archive fiscal years fetched by `topo pull usaspending`
 # (reporting window plus lookback), through the fiscal year of the Pull date.
-pull_from_fy = 2015
+pull_from_fy = 2010  # the TRIO lookback horizon ([lookback] trio_from_fy)
 # Per-agency archives to fetch. Grants are never selected by agency; this only
 # says which archive files are downloaded. `bulk_agency_id` is USAspending's
 # id for list_monthly_files (ED = 80).
@@ -74,3 +74,19 @@ auto_accept_min_checks = 10
 # Once the answer key in data/curated/host_answer_key.csv is labelled, pin its
 # sha256 here; any later edit to the frozen key then stops the run. "" = not pinned.
 answer_key_sha256 = ""
+
+[api_keys]
+# Environment variables holding API keys (never the keys themselves). Set them in
+# the shell or in a .env file beside this one; .env is git-ignored. Only the
+# Census API takes a key.
+census = "CENSUS_API_KEY"
+
+[lookback]
+# Lookback (#39): Grants whose project period ended before the reporting window
+# are read back to these fiscal years, only for Succession links and Cohort
+# starts. They never get amount columns or reconciliation rows.
+trio_from_fy = 2010
+gear_up_from_fy = 2015
+# An FY is a Cohort start for a Program when its new awards (A1s) number at least
+# this share of the Program's largest yearly count. ASSUMPTION.
+cohort_min_share = 0.5

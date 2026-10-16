@@ -8,22 +8,34 @@ layer under the same date, so the two can't disagree.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import polars as pl
 
-from topo import curated
+from topo import curated, provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
-from topo.domain.ed_lists import join_ed_lists
+from topo.domain.ed_lists import NOT_IN_USASPENDING, join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
-from topo.domain.grant_universe import GrantUniverse, build_grant_universe
-from topo.domain.host_gating import Gate, check_separate, gate_and_override
+from topo.domain.grant_universe import (
+    EXCEPTION_UNKNOWN_FAIN_PREFIX,
+    GrantUniverse,
+    build_grant_universe,
+    build_lookback,
+)
+from topo.domain.host_gating import Gate, apply_overrides, check_separate, gate_and_override, gate_host_links
 from topo.domain.host_linking import UNITID, HostLookups, build_host_links
+from topo.domain.succession import (
+    LookbackSettings,
+    build_successions,
+    derive_cohorts,
+    detect_hand_offs,
+    successor_fains,
+)
 from topo.fiscal import ReportingWindow
-from topo.guards import StructuralBreak
+from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
@@ -31,6 +43,8 @@ from topo.outputs.target_list import build_target_list, write_target_list_csv
 from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
+DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
+DROP_ED_ROW_NOT_A_GRANT_YEAR = "ed_list_row_not_a_grant_year"  # FAIN in USAspending, but no Grant-year in the window
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
 HOST_LINKS_BY_RULE = "host_links_by_rule"  # the rule cascade's own decision per FAIN
 HOST_LINKS = "host_links"  # one row per FAIN after gating and overrides: what the outputs show
@@ -38,6 +52,13 @@ CASE_LABEL_ACCURACY = "case_label_accuracy"  # per Case label: answer-key checks
 HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its signals
 FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
 GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
+# Succession and lookback (#39). Lookback Grants feed only these tables, never amounts or reconciliation.
+LOOKBACK_GRANTS = "lookback_grants"  # Grants that ended before the window, back to the lookback horizon
+LOOKBACK_HOST_LINKS = "lookback_host_links"
+COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date, new Grants
+GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
+SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
+HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
 
 
 @dataclass(frozen=True)
@@ -84,11 +105,16 @@ def clean(config: Config, source: str, pull_date: dt.date | None = None) -> pl.D
 def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, GrantUniverse]:
     as_of = resolve_as_of(config, as_of)
     actions = usaspending.read_cleaned(config)
+    check_layer_handoff(
+        "join", actions.height, "clean", run_log.last_rows_out(config, "clean", usaspending.SOURCE),
+        usaspending.SOURCE,
+    )
     window = ReportingWindow.ending_before(config.reporting_window_start_fy, as_of)
     universe = build_grant_universe(actions, window)
     pull_dates = actions["pull_date"].unique().to_list()
     pull_date = max(pull_dates) if pull_dates else usaspending.latest_pull_date(config.layout)
     context = RunContext(as_of=as_of, pull_date=pull_date, window=window)
+    _log_join(config, actions, universe, pull_date)
 
     joined = config.layout.joined
     joined.mkdir(parents=True, exist_ok=True)
@@ -96,51 +122,138 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
-    _join_host_links(config, universe, actions)
-    _join_funding_status(config, universe, context)
-    _join_ed_lists(config, universe, actions)
+    lookups = HostLookups.from_directory(ipeds.read_directory(config))
+    host_links, after_rules = _join_host_links(config, universe, actions, lookups)
+    successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
+    _join_funding_status(config, universe, context, successors)
+    _join_ed_lists(config, universe, actions, pull_date)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
 
 
-def _join_host_links(config: Config, universe: GrantUniverse, actions: pl.DataFrame) -> None:
-    """Rule cascade, then answer-key gating, then overrides (ADR 0002)."""
-    lookups = HostLookups.from_directory(ipeds.read_directory(config))
+def _join_host_links(
+    config: Config, universe: GrantUniverse, actions: pl.DataFrame, lookups: HostLookups
+) -> tuple[pl.DataFrame, Callable[[pl.DataFrame], pl.DataFrame]]:
+    """Rule cascade, then answer-key gating, then overrides (ADR 0002).
+
+    Returns the final Host links and the same after-the-rules step, for Host links
+    built elsewhere (lookback Grants) to be gated and overridden alike.
+    """
     rule_links, candidates = build_host_links(universe.grants, actions, lookups)
     answer_key = curated.read_answer_key(config)
     check_separate(answer_key, curated.read_tuning_set(config))
+    overrides = curated.read_overrides(config)
     host_names = {(UNITID, uid): unit.name for uid, unit in lookups.units.items()}
     links, accuracy = gate_and_override(
-        rule_links, answer_key, curated.read_overrides(config), Gate.from_section(config.section("host_linking")),
-        host_names,
+        rule_links, answer_key, overrides, Gate.from_section(config.section("host_linking")), host_names
     )
     rule_links.write_parquet(config.layout.joined_table(HOST_LINKS_BY_RULE))
     links.write_parquet(config.layout.joined_table(HOST_LINKS))
     candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     accuracy.write_parquet(config.layout.joined_table(CASE_LABEL_ACCURACY))
 
+    def after_rules(other_rule_links: pl.DataFrame) -> pl.DataFrame:
+        return apply_overrides(gate_host_links(other_rule_links, accuracy), overrides, host_names)
 
-def _join_funding_status(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    return links, after_rules
+
+
+def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pull_date: dt.date) -> None:
+    """Run-log the join: every cleaned action is a Grant action, an exception, or outside the window."""
+    exceptions = universe.exceptions.height
+    outside = actions.filter(
+        ~pl.col("fain").is_in(universe.grants["fain"].implode())
+        & ~pl.col("transaction_key").is_in(universe.exceptions["transaction_key"].implode())
+    ).height
+    if exceptions:
+        warn(f"{exceptions} actions in grant_universe_exceptions ({EXCEPTION_UNKNOWN_FAIN_PREFIX})")
+    run_log.record(
+        config, layer="join", source="grant_universe", rows_in=actions.height,
+        rows_out=universe.grant_actions.height,
+        drops={EXCEPTION_UNKNOWN_FAIN_PREFIX: exceptions, DROP_OUTSIDE_WINDOW: outside},
+        pull_date=pull_date,
+        input_hash=provenance.file_sha256(config.layout.cleaned_table(usaspending.CLEANED_TABLE)),
+    )
+
+
+def _join_succession(
+    config: Config, universe: GrantUniverse, actions: pl.DataFrame, host_links: pl.DataFrame, lookups: HostLookups,
+    after_rules: Callable[[pl.DataFrame], pl.DataFrame],
+) -> dict[str, set[str]]:
+    """Lookback Grants, Cohort starts, Succession links and hand-offs; returns FAIN -> successor FAINs."""
+    settings = LookbackSettings.from_config(config)
+    lookback = build_lookback(actions, universe.window, settings.from_fy_by_family)
+    lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups)[0])
+    grants = pl.concat([universe.grants, lookback.grants])
+    grant_actions = pl.concat([universe.grant_actions, lookback.grant_actions])
+    cohort_starts, grant_cohorts = derive_cohorts(grants, grant_actions, settings.cohort_min_share)
+    successions = build_successions(grants, pl.concat([host_links, lookback_host_links]), grant_cohorts)
+    hand_offs = detect_hand_offs(grant_actions)
+    tables = {
+        LOOKBACK_GRANTS: lookback.grants, LOOKBACK_HOST_LINKS: lookback_host_links, COHORT_STARTS: cohort_starts,
+        GRANT_COHORTS: grant_cohorts, SUCCESSIONS: successions, HAND_OFFS: hand_offs,
+    }
+    for name, frame in tables.items():
+        frame.write_parquet(config.layout.joined_table(name))
+    return successor_fains(successions, hand_offs)
+
+
+def _join_funding_status(
+    config: Config, universe: GrantUniverse, context: RunContext, successors: dict[str, set[str]]
+) -> None:
     """Read Funding status under the As-of date, write it to the joined layer, append the history."""
     periods, per_grant = read_grants_funding_status(
-        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of
+        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of,
+        successor_fains=successors,
+    )
+    run_log.record(
+        config, layer="join", source=GRANT_FUNDING_STATUS, rows_in=universe.grants.height,
+        rows_out=per_grant.height, drops={}, pull_date=context.pull_date,
+        input_hash=provenance.combined_hash(
+            provenance.file_sha256(config.layout.joined_table(name)) for name in ("grants", "grant_actions")
+        ),
     )
     periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
     per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
 
 
-def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame) -> None:
+def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame, pull_date: dt.date) -> None:
     """Grant-year ED-list attributes and ED-list-only FAIN exceptions (joined layer)."""
+    trio = ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE)
+    check_layer_handoff(
+        "join", trio.height, "clean",
+        run_log.last_rows_out(config, "clean", ed_grantee_lists.TRIO_TABLE), ed_grantee_lists.TRIO_TABLE,
+    )
     ed = join_ed_lists(
         universe.grants,
         actions["fain"].unique(),
-        ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
+        trio,
         ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
         universe.window,
     )
+    if trio.height:
+        _log_ed_lists(config, trio, actions, ed.grant_year_attributes, ed.exceptions.height, pull_date)
     ed.grant_year_attributes.write_parquet(config.layout.joined_table("grant_year_ed_attributes"))
     ed.exceptions.write_parquet(config.layout.joined_table("ed_list_exceptions"))
+
+
+def _log_ed_lists(
+    config: Config, trio: pl.DataFrame, actions: pl.DataFrame, attributes: pl.DataFrame, exceptions: int,
+    pull_date: dt.date,
+) -> None:
+    """Run-log the ED TRIO list rows: each attaches to a Grant-year, is an exception, or matches no Grant-year."""
+    in_usaspending = pl.col("fain").is_in(actions["fain"].unique().implode())
+    not_a_grant_year = trio.filter(in_usaspending).join(
+        attributes.select("fain", "fiscal_year"), on=["fain", "fiscal_year"], how="anti"
+    ).height
+    attached = attributes.filter(pl.col("ed_list_row_id").is_not_null()).height
+    run_log.record(
+        config, layer="join", source="grant_year_ed_attributes", rows_in=trio.height, rows_out=attached,
+        drops={NOT_IN_USASPENDING: exceptions, DROP_ED_ROW_NOT_A_GRANT_YEAR: not_a_grant_year},
+        pull_date=pull_date,
+        input_hash=provenance.file_sha256(config.layout.cleaned_table(ed_grantee_lists.TRIO_TABLE)),
+    )
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
@@ -172,10 +285,24 @@ def report(config: Config) -> Delivered:
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
+    run_log.record(
+        config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
+        drops={}, pull_date=context.pull_date,
+        input_hash=provenance.combined_hash(
+            provenance.file_sha256(config.layout.joined_table(name))
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
+        ),
+    )
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     candidates = pl.read_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
-    queue = build_review_queue(host_links, candidates, universe.grants, universe.fy_obligations)
+    lookback_grants = pl.read_parquet(config.layout.joined_table(LOOKBACK_GRANTS))
+    queue = build_review_queue(
+        host_links, candidates, universe.grants, universe.fy_obligations,
+        succession_pool=pl.concat([universe.grants, lookback_grants], how="diagonal_relaxed"),
+    )
     queue_path = write_review_queue_csv(queue, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, queue_path, as_of=context.as_of, pull_date=context.pull_date)
     quality = render_match_quality(
         MatchQualityInputs(
             pull_date=context.pull_date,
@@ -192,27 +319,18 @@ def report(config: Config) -> Delivered:
         )
     )
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, quality_path, as_of=context.as_of, pull_date=context.pull_date)
     return Delivered(target_list_csv=path, review_queue_csv=queue_path, match_quality=quality_path)
 
 
 def _input_hashes(config: Config) -> list[tuple[str, str]]:
-    """sha256 of the config, the curated files and every raw file of each source's latest pull."""
+    """(path, sha256) of the config, the curated files and every raw file behind the cleaned layer."""
     base = config.path.parent
-    paths = [config.path, *sorted(p for p in config.layout.curated.glob("*") if p.is_file())]
-    if config.layout.raw.exists():
-        for source_dir in sorted(p for p in config.layout.raw.iterdir() if p.is_dir()):
-            pulls = sorted(p for p in source_dir.iterdir() if p.is_dir() and _is_date(p.name))
-            if pulls:
-                paths += sorted(p for p in pulls[-1].rglob("*") if p.is_file())
-    return [(str(p.relative_to(base)), hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths]
-
-
-def _is_date(name: str) -> bool:
-    try:
-        dt.date.fromisoformat(name)
-    except ValueError:
-        return False
-    return True
+    own = [config.path, *sorted(p for p in config.layout.curated.glob("*") if p.is_file())]
+    return [
+        *((p.relative_to(base).as_posix(), provenance.file_sha256(p)) for p in own),
+        *((f["path"], f["sha256"]) for f in provenance.raw_inputs(config)),
+    ]
 
 
 def run(config: Config, as_of: dt.date | None = None) -> Delivered:

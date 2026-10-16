@@ -181,7 +181,10 @@ def score_case_labels(rule_links: pl.DataFrame, answer_key: pl.DataFrame, gate: 
 
 def gate_host_links(rule_links: pl.DataFrame, accuracy: pl.DataFrame) -> pl.DataFrame:
     """Apply each Case label's gating: demoted labels go to review (their pick, if any, stays shown)."""
-    gated = rule_links.join(accuracy.select("case_label", "gating"), on="case_label", how="left")
+    # A label the accuracy table hasn't seen (on lookback Grants, say) has no checks: unverified.
+    gated = rule_links.join(accuracy.select("case_label", "gating"), on="case_label", how="left").with_columns(
+        pl.col("gating").fill_null(UNVERIFIED)
+    )
     outcome = pl.when(pl.col("gating") == DEMOTED).then(pl.lit(REVIEW)).otherwise(pl.col("outcome"))
     return gated.with_columns(
         pl.col("outcome").alias("rule_outcome"),

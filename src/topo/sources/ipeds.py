@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 import pandera.polars as pa
 import polars as pl
 
+from topo import provenance, run_log
 from topo.config import Config, Layout
 from topo.guards import StructuralBreak, check_schema, check_unique
 from topo.sources.usaspending import PulledFile
@@ -224,14 +225,40 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     urls = _urls(config)
     from_year = int(config.section(SOURCE)["directory_from_year"])
     directory_name, enrollment_name = _file_name(urls["directory"]), _file_name(urls["enrollment"])
-    directory = clean_directory(
-        _scan(folder / directory_name), from_year=from_year, raw_file=directory_name, pull_date=pull_date
-    )
-    enrollment = clean_enrollment(_scan(folder / enrollment_name), raw_file=enrollment_name, pull_date=pull_date)
+    directory_raw, enrollment_raw = _scan(folder / directory_name), _scan(folder / enrollment_name)
+    input_hash = provenance.record_raw_inputs(config, SOURCE, [folder / directory_name, folder / enrollment_name])
+    directory = clean_directory(directory_raw, from_year=from_year, raw_file=directory_name, pull_date=pull_date)
+    enrollment = clean_enrollment(enrollment_raw, raw_file=enrollment_name, pull_date=pull_date)
+    _log_clean(config, DIRECTORY_TABLE, directory_raw, directory, pull_date, input_hash, {
+        "year_before_directory_from_year": _year(directory_raw).is_null() | (_year(directory_raw) < from_year),
+    })
+    breakdowns = [c for c in ENROLLMENT_BREAKDOWNS if c in enrollment_raw.collect_schema().names()]
+    is_total = pl.all_horizontal([pl.col(c).str.strip_chars() == "99" for c in breakdowns]).fill_null(False)
+    reported = ~pl.col("enrollment_fall").str.strip_chars().is_in(["", *URBAN_MISSING]).fill_null(True)
+    _log_clean(config, ENROLLMENT_TABLE, enrollment_raw, enrollment, pull_date, input_hash, {
+        "not_a_total_enrollment_row": ~is_total,
+        "enrollment_not_reported": is_total & ~reported,
+    })
     layout.cleaned.mkdir(parents=True, exist_ok=True)
     directory.write_parquet(layout.cleaned_table(DIRECTORY_TABLE))
     enrollment.write_parquet(layout.cleaned_table(ENROLLMENT_TABLE))
     return directory
+
+
+def _year(raw: pl.LazyFrame) -> pl.Expr:
+    return pl.col("year").str.strip_chars().replace(["", *URBAN_MISSING], None).cast(pl.Int64)
+
+
+def _log_clean(
+    config: Config, table: str, raw: pl.LazyFrame, cleaned: pl.DataFrame, pull_date: dt.date,
+    input_hash: str, drops: dict[str, pl.Expr],
+) -> None:
+    """Run-log one cleaned IPEDS table; drops are counted on the raw rows in their own pass."""
+    counts = raw.select(pl.len().alias("rows_in"), *[e.sum().alias(r) for r, e in drops.items()]).collect().row(0)
+    run_log.record(
+        config, layer="clean", source=table, rows_in=counts[0], rows_out=cleaned.height,
+        drops={r: int(n) for r, n in zip(drops, counts[1:])}, pull_date=pull_date, input_hash=input_hash,
+    )
 
 
 def _empty(model: type[pa.DataFrameModel]) -> pl.DataFrame:

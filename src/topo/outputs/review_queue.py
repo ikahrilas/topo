@@ -6,10 +6,10 @@ Grants are ordered by dollars (cumulative obligation over the reporting
 window), then by Succession impact, then FAIN, and numbered by that order in
 `Priority`.
 
-Succession impact (ASSUMPTION until the Succession builder, #39, exists): the
-number of other Grants in the universe with the same Recipient (UEI, else name)
-and Program. A Succession needs the same Host on both Grants, so those are the
-links this one decision can make or break.
+Succession impact (ASSUMPTION): the number of other Grants, in the window or
+the lookback, with the same Recipient (UEI, else name) and Program. A Succession
+(#39) needs the same Host on both Grants and a review Grant's Host is unsettled, so
+these are the Succession links this one decision can make or break.
 
 Reviewers record decisions in data/curated/host_overrides.csv; an overridden
 Grant leaves the queue on the next run. Unreviewed Grants stay `review`.
@@ -34,24 +34,35 @@ def grant_dollars(grants: pl.DataFrame, fy_obligations: pl.DataFrame) -> pl.Data
     return grants.select("fain").join(sums, on="fain", how="left").with_columns(pl.col("dollars").fill_null(0.0))
 
 
-def succession_impact(grants: pl.DataFrame) -> pl.DataFrame:
-    """fain -> other Grants sharing its Recipient (UEI, else name) and Program."""
+def succession_impact(pool: pl.DataFrame) -> pl.DataFrame:
+    """fain -> other Grants in the pool sharing its Recipient (UEI, else name) and Program."""
     recipient = pl.coalesce(pl.col("recipient_uei"), pl.col("recipient_name"))
-    return grants.select(
+    return pool.select(
         "fain",
         (pl.len().over(recipient, "program") - 1).cast(pl.Int64).alias("succession_impact"),
     )
 
 
 def build_review_queue(
-    host_links: pl.DataFrame, candidates: pl.DataFrame, grants: pl.DataFrame, fy_obligations: pl.DataFrame
+    host_links: pl.DataFrame,
+    candidates: pl.DataFrame,
+    grants: pl.DataFrame,
+    fy_obligations: pl.DataFrame,
+    *,
+    succession_pool: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
+    """Review Grants with their candidates, in priority order.
+
+    `succession_pool` is every Grant a Succession could link (in-window plus
+    lookback); it defaults to `grants`.
+    """
+    pool = grants if succession_pool is None else succession_pool
     queue = (
         host_links.filter(pl.col("outcome") == REVIEW)
         .select("fain", "case_label", "gating")
         .join(grants.select("fain", "recipient_name", "recipient_uei", "recipient_state", "program"), on="fain")
         .join(grant_dollars(grants, fy_obligations), on="fain")
-        .join(succession_impact(grants), on="fain")
+        .join(succession_impact(pool), on="fain")
         .sort(["dollars", "succession_impact", "fain"], descending=[True, True, False])
         .with_row_index("priority", offset=1)
     )
