@@ -114,7 +114,7 @@ def test_tier_2_rows_show_the_predicted_due_date_and_re_competing_soon_is_the_se
     rows = project.read_csv(f"target_list_{PULL}.csv")
     shown = [(r["FAIN"], r["Priority tier"], r["Label"], r["Lifecycle stage"]) for r in rows]
     assert shown == [
-        ("P047A220001", "2", "Re-competing soon", "final budget period"),
+        ("P047A220001", "2", "Re-competing soon", "re-competing soon"),  # set by the timing module
         ("P042A230003", "3", "Continuing", "continuing"),
         ("P047A220002", "4", "Unfunded (not yet readable; readable from 2026-11-30)", "final budget period"),
     ]

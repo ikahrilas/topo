@@ -43,7 +43,7 @@ from typing import Any
 import pandera.polars as pa
 import polars as pl
 
-from topo.domain.funding_status import FUNDED, add_months
+from topo.domain.funding_status import ENDED, FUNDED, add_months
 from topo.domain.programs import GEAR_UP, PROGRAMS, TRIO, program_for
 from topo.fiscal import fiscal_year
 from topo.guards import check_schema
@@ -54,6 +54,9 @@ DATE_UNKNOWN = "date unknown"
 NOT_PREDICTED = "timing not predicted"
 NO_COHORT = "timing not predicted: no Cohort start in the pull"
 GEAR_UP_TIMING = "competes most years; timing not predicted"
+# The Lifecycle stage this module adds to the Funding status reader's (new, continuing,
+# final budget period, ended): a flagged Grant that has not ended is re-competing soon.
+RE_COMPETING_SOON = "re-competing soon"
 
 # Evidence tiers.
 NOTICE_PUBLISHED = "notice published"
@@ -127,6 +130,7 @@ class RenewalTiming(pa.DataFrameModel):
     evidence_tier: str = pa.Field(nullable=True)
     timing: str
     re_competing_soon: bool
+    lifecycle_stage: str = pa.Field(nullable=True)  # the reader's stage, or "re-competing soon" when flagged
     end_date: dt.date = pa.Field(nullable=True)  # GEAR UP only: the Grant's expected end
     end_date_fact: str = pa.Field(nullable=True)  # GEAR UP only: "expires within 12 months (end date ...)"
 
@@ -248,6 +252,7 @@ def read_renewal_timing(
     cohorts = dict(grant_cohorts.select("fain", "cohort_fy").iter_rows())
     timing = {(r["program"], r["cohort_fy"]): r for r in cohort_timing.iter_rows(named=True)}
     readable = dict(funding.select("fain", "latest_readable_status").iter_rows())
+    stages = dict(funding.select("fain", "lifecycle_stage").iter_rows())
     horizon = add_months(as_of, settings.lead_months)
 
     rows = []
@@ -274,12 +279,15 @@ def read_renewal_timing(
             row["re_competing_soon"] = bool(
                 due is not None and due <= horizon and readable.get(g["fain"]) in FUNDED and not newer
             )
+        stage = stages.get(g["fain"])
+        row["lifecycle_stage"] = RE_COMPETING_SOON if row["re_competing_soon"] and stage != ENDED else stage
         rows.append(row)
     frame = pl.DataFrame(
         rows,
         schema={"fain": pl.String, "cohort_fy": pl.Int64, "predicted_competition_fy": pl.Int64,
                 "predicted_due_date": pl.Date, "evidence_tier": pl.String, "timing": pl.String,
-                "re_competing_soon": pl.Boolean, "end_date": pl.Date, "end_date_fact": pl.String},
+                "re_competing_soon": pl.Boolean, "end_date": pl.Date, "end_date_fact": pl.String,
+                "lifecycle_stage": pl.String},
         orient="row",
     ).select(list(RenewalTiming.to_schema().columns)).sort("fain")
     exceptions = _cohort_exceptions(grants, grant_actions, cohorts, cohort_timing, settings)

@@ -79,7 +79,8 @@ GLOSSARY = (
     ("Budget period", "The stretch of a Grant, usually 12 months, that one funding action funds."),
     ("Funding status", "What happened to a Budget period's funding, read from funding actions: continued, funded "
                        "late, unfunded, reversed, or not yet readable. A pattern, never a cause."),
-    ("Lifecycle stage", "Where a Grant sits in its project period: new, continuing, final budget period, ended."),
+    ("Lifecycle stage", "Where a Grant sits in its project period: new, continuing, final budget period, ended; "
+                        "re-competing soon when renewal timing flags it."),
     ("2025–26 disruption", "Funding missing, late or reversed for a Budget period starting 2025-05-01 to "
                            "2026-09-30, whether or not later restored; not proof of a policy cut."),
     ("Label", "One label per row, first match wins: Unfunded or Reversed, Re-competing soon, New, Final budget "
@@ -306,7 +307,7 @@ def build_target_list(
         .select(
             pl.col("priority_tier").alias("Priority tier"),
             pl.col("label").alias("Label"),
-            pl.col("lifecycle_stage").alias("Lifecycle stage"),
+            pl.coalesce("timing_lifecycle_stage", "lifecycle_stage").alias("Lifecycle stage"),
             pl.col("funding_status").alias("Funding status"),
             pl.col("latest_readable_status").alias("Latest readable status"),
             pl.col("readable_from").alias("Readable from"),
@@ -345,9 +346,10 @@ def _timing_columns(timing: pl.DataFrame | None) -> pl.DataFrame:
         timing = pl.DataFrame(schema={"fain": pl.String, "re_competing_soon": pl.Boolean,
                                       "predicted_due_date": pl.Date, "evidence_tier": pl.String,
                                       "predicted_competition_fy": pl.Int64, "timing": pl.String,
-                                      "end_date_fact": pl.String})
+                                      "end_date_fact": pl.String, "lifecycle_stage": pl.String})
     return timing.select(
         "fain",
+        pl.col("lifecycle_stage").alias("timing_lifecycle_stage"),  # renewal timing adds "re-competing soon"
         pl.col("re_competing_soon"),
         pl.when(pl.col("re_competing_soon")).then(pl.lit("yes")).otherwise(pl.lit("no"))
         .alias("re_competing_soon_shown"),
