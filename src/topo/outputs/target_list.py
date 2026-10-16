@@ -81,7 +81,13 @@ GLOSSARY = (
               "readable."),
     ("Priority tier", "Call-order bucket, not a score: 1 new within {months} months of the award; 2 re-competing "
                       "soon; 3 continuing; 4 unfunded or reversed (with its reason; not a call list)."),
-    ("Cause note", "Shown only where a cited public source names the Grant's FAIN."),
+    ("Predicted due date", "The expected application deadline of the Program's next competition: the prior "
+                           "Cohort's published deadline plus 60 months (a prediction not yet tested). Evidence "
+                           "tier: notice published or inferred. \"date unknown\" when no deadline is on file; "
+                           "\"timing not predicted\" when the Program's cycle isn't 60 months, and for GEAR UP."),
+    ("End date", "GEAR UP only: the Grant's expected end, when it falls within the lead time. An end date, "
+                 "not a due date."),
+    ("Cause note","Shown only where a cited public source names the Grant's FAIN."),
     ("Pull date", "The date the source data was fetched."),
     ("As-of date", "The date the data is read as of; Funding status is judged against it."),
 )
@@ -141,6 +147,15 @@ def awaited_notes(universe: GrantUniverse, settings: TargetListSettings) -> dict
         if not any(f.startswith(c.fain_prefix()) for f in fains)
     }
 
+TIMING_COLUMNS = {  # joined renewal_timing column -> display column (#40)
+    "re_competing_soon_shown": "Re-competing soon",
+    "predicted_due_date": "Predicted due date",
+    "evidence_tier": "Evidence tier",
+    "predicted_competition_fy": "Predicted competition FY",
+    "timing": "Renewal timing",
+    "end_date_fact": "End date",
+}
+
 
 def build_target_list(
     universe: GrantUniverse,
@@ -152,16 +167,19 @@ def build_target_list(
     cause_notes: pl.DataFrame | None = None,
     pull_date: dt.date | None = None,
     settings: TargetListSettings = TargetListSettings(),
+    timing: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Every target-list row (main and Ended sheets), sorted, in display column order.
 
     `host_links` is the joined Host-links table, one row per FAIN. `funding` is the
     joined grant_funding_status table (one row per FAIN) and `funding_periods` the
     joined funding_status table (one row per FAIN and Budget period). `cause_notes`
-    is the curated cause-notes table (topo.domain.cause_notes).
+    is the curated cause-notes table (topo.domain.cause_notes). `timing` is the
+    joined renewal_timing table (topo.domain.renewal_timing, one row per FAIN).
     """
     if funding is None:
         funding = pl.DataFrame(schema={"fain": pl.String, **{c: pl.String for c in FUNDING_COLUMNS}})
+    timing = _timing_columns(timing)
     grants = universe.grants
     if pull_date is None:
         pull_date = grants["pull_date"].max() if grants.height else as_of
@@ -210,6 +228,7 @@ def build_target_list(
         .join(funding.select("fain", *FUNDING_COLUMNS), on="fain", how="left")
         .join(_latest_readable_periods(funding_periods), on="fain", how="left")
         .join(notes, on="fain", how="left")
+        .join(timing, on="fain", how="left")
         .with_columns(pl.col(labels).fill_null(0.0), pl.col("Cumulative obligation").fill_null(0.0))
     )
     rows = rows.with_columns(
@@ -235,6 +254,7 @@ def build_target_list(
             pl.col("readable_from").alias("Readable from"),
             pl.col("disruption").alias("2025–26 disruption"),
             pl.col("tier_reason").alias("Tier reason"),
+            *(pl.col(src).alias(shown) for src, shown in TIMING_COLUMNS.items()),
             "Cause note",
             pl.col("recipient_name").alias("Recipient"),
             pl.col("recipient_uei").alias("Recipient UEI"),
@@ -256,6 +276,26 @@ def build_target_list(
             pl.col("pull_date").alias("Pull date"),
             pl.lit(as_of).alias("As-of date"),
         )
+    )
+
+
+def _timing_columns(timing: pl.DataFrame | None) -> pl.DataFrame:
+    """The renewal-timing fields per FAIN, ready to show (Predicted competition FY as "FY2027")."""
+    if timing is None:
+        timing = pl.DataFrame(schema={"fain": pl.String, "re_competing_soon": pl.Boolean,
+                                      "predicted_due_date": pl.Date, "evidence_tier": pl.String,
+                                      "predicted_competition_fy": pl.Int64, "timing": pl.String,
+                                      "end_date_fact": pl.String})
+    return timing.select(
+        "fain",
+        pl.col("re_competing_soon"),
+        pl.when(pl.col("re_competing_soon")).then(pl.lit("yes")).otherwise(pl.lit("no"))
+        .alias("re_competing_soon_shown"),
+        "predicted_due_date",
+        "evidence_tier",
+        (pl.lit("FY") + pl.col("predicted_competition_fy").cast(pl.String)).alias("predicted_competition_fy"),
+        "timing",
+        "end_date_fact",
     )
 
 
@@ -295,6 +335,7 @@ def _labels(rows: pl.DataFrame, as_of: dt.date, settings: TargetListSettings) ->
                 latest_readable_period=(start, end) if start is not None else None,
                 lifecycle_stage=r["lifecycle_stage"],
                 award_date=r["award_date"],
+                re_competing_soon=bool(r["re_competing_soon"]),
             ),
             as_of,
             settings.new_award_months,
