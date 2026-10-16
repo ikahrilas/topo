@@ -25,7 +25,7 @@ reconciliation_absolute_usd = 1_000_000
 [usaspending]
 # Award Data Archive fiscal years fetched by `topo pull usaspending`
 # (reporting window plus lookback), through the fiscal year of the Pull date.
-pull_from_fy = 2015
+pull_from_fy = 2010  # the TRIO lookback horizon ([lookback] trio_from_fy)
 # Per-agency archives to fetch. Grants are never selected by agency; this only
 # says which archive files are downloaded. `bulk_agency_id` is USAspending's
 # id for list_monthly_files (ED = 80).
@@ -83,3 +83,24 @@ awaited_cohorts = [
     { program = "Talent Search", fy = 2026 },
     { program = "Educational Opportunity Centers", fy = 2026 },
 ]
+
+[lookback]
+# Lookback (#39): Grants whose project period ended before the reporting window
+# are read back to these fiscal years, only for Succession links and Cohort
+# starts. They never get amount columns or reconciliation rows.
+trio_from_fy = 2010
+gear_up_from_fy = 2015
+# An FY is a Cohort start for a Program when its new awards (A1s) number at least
+# this share of the Program's largest yearly count. ASSUMPTION.
+cohort_min_share = 0.5
+
+[ccd]
+# Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
+# fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.
+lea_directory_url = "https://educationdata.urban.org/csv/ccd/school-districts_lea_directory.csv"
+# District years kept: names since 2015 cover renamed districts.
+directory_from_year = 2015
+# CCD agency types kept as possible district Hosts: 1 regular, 2 component of a
+# supervisory union, 4 regional education service agency, 5 state agency,
+# 7 independent charter agency (the host-linking prototype's set).
+agency_types = [1, 2, 4, 5, 7]

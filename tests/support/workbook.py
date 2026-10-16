@@ -29,6 +29,11 @@ def read_sheet(path: Path, sheet: str) -> list[dict[str, str]]:
     return [dict(zip(header, (_text(v) for v in row))) for row in rows[1:]]
 
 
+def every_row(path: Path) -> list[dict[str, str]]:
+    """All target-list rows: the main sheet, then the Ended sheet (the CSV holds the main sheet only)."""
+    return read_sheet(path, "Target list") + read_sheet(path, "Ended")
+
+
 def load_header(path: Path, sheet: str) -> list[str]:
     first = next(load_workbook(path, read_only=True)[sheet].iter_rows(values_only=True))
     return [_text(c) for c in first]

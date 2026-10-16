@@ -16,10 +16,22 @@ import polars as pl
 
 from topo import provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
-from topo.domain.ed_lists import join_ed_lists
+from topo.domain.ed_lists import NOT_IN_USASPENDING, join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
-from topo.domain.grant_universe import EXCEPTION_UNKNOWN_FAIN_PREFIX, GrantUniverse, build_grant_universe
+from topo.domain.grant_universe import (
+    EXCEPTION_UNKNOWN_FAIN_PREFIX,
+    GrantUniverse,
+    build_grant_universe,
+    build_lookback,
+)
 from topo.domain.host_linking import HostLookups, build_host_links
+from topo.domain.succession import (
+    LookbackSettings,
+    build_successions,
+    derive_cohorts,
+    detect_hand_offs,
+    successor_fains,
+)
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
@@ -33,15 +45,23 @@ from topo.outputs.target_list import (
     provisional_fiscal_years,
     write_target_list,
 )
-from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
+from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
+DROP_ED_ROW_NOT_A_GRANT_YEAR = "ed_list_row_not_a_grant_year"  # FAIN in USAspending, but no Grant-year in the window
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
 HOST_LINKS = "host_links"  # one row per FAIN: outcome, Case label, Host, Host confidence
 HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its signals
 FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
 GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
+# Succession and lookback (#39). Lookback Grants feed only these tables, never amounts or reconciliation.
+LOOKBACK_GRANTS = "lookback_grants"  # Grants that ended before the window, back to the lookback horizon
+LOOKBACK_HOST_LINKS = "lookback_host_links"
+COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date, new Grants
+GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
+SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
+HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
 
 
 @dataclass(frozen=True)
@@ -105,13 +125,13 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
-    host_links, host_link_candidates = build_host_links(
-        universe.grants, actions, HostLookups.from_directory(ipeds.read_directory(config))
-    )
+    lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
+    host_links, host_link_candidates = build_host_links(universe.grants, actions, lookups)
     host_links.write_parquet(config.layout.joined_table(HOST_LINKS))
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
-    _join_funding_status(config, universe, context)
-    _join_ed_lists(config, universe, actions)
+    successors = _join_succession(config, universe, actions, host_links, lookups)
+    _join_funding_status(config, universe, context, successors)
+    _join_ed_lists(config, universe, actions, pull_date)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
 
@@ -134,27 +154,83 @@ def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pu
     )
 
 
-def _join_funding_status(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+def _join_succession(
+    config: Config, universe: GrantUniverse, actions: pl.DataFrame, host_links: pl.DataFrame, lookups: HostLookups
+) -> dict[str, set[str]]:
+    """Lookback Grants, Cohort starts, Succession links and hand-offs; returns FAIN -> successor FAINs."""
+    settings = LookbackSettings.from_config(config)
+    lookback = build_lookback(actions, universe.window, settings.from_fy_by_family)
+    lookback_host_links, _ = build_host_links(lookback.grants, actions, lookups)
+    grants = pl.concat([universe.grants, lookback.grants])
+    grant_actions = pl.concat([universe.grant_actions, lookback.grant_actions])
+    cohort_starts, grant_cohorts = derive_cohorts(grants, grant_actions, settings.cohort_min_share)
+    successions = build_successions(grants, pl.concat([host_links, lookback_host_links]), grant_cohorts)
+    hand_offs = detect_hand_offs(grant_actions)
+    tables = {
+        LOOKBACK_GRANTS: lookback.grants, LOOKBACK_HOST_LINKS: lookback_host_links, COHORT_STARTS: cohort_starts,
+        GRANT_COHORTS: grant_cohorts, SUCCESSIONS: successions, HAND_OFFS: hand_offs,
+    }
+    for name, frame in tables.items():
+        frame.write_parquet(config.layout.joined_table(name))
+    return successor_fains(successions, hand_offs)
+
+
+def _join_funding_status(
+    config: Config, universe: GrantUniverse, context: RunContext, successors: dict[str, set[str]]
+) -> None:
     """Read Funding status under the As-of date, write it to the joined layer, append the history."""
     periods, per_grant = read_grants_funding_status(
-        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of
+        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of,
+        successor_fains=successors,
+    )
+    run_log.record(
+        config, layer="join", source=GRANT_FUNDING_STATUS, rows_in=universe.grants.height,
+        rows_out=per_grant.height, drops={}, pull_date=context.pull_date,
+        input_hash=provenance.combined_hash(
+            provenance.file_sha256(config.layout.joined_table(name)) for name in ("grants", "grant_actions")
+        ),
     )
     periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
     per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
 
 
-def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame) -> None:
+def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame, pull_date: dt.date) -> None:
     """Grant-year ED-list attributes and ED-list-only FAIN exceptions (joined layer)."""
+    trio = ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE)
+    check_layer_handoff(
+        "join", trio.height, "clean",
+        run_log.last_rows_out(config, "clean", ed_grantee_lists.TRIO_TABLE), ed_grantee_lists.TRIO_TABLE,
+    )
     ed = join_ed_lists(
         universe.grants,
         actions["fain"].unique(),
-        ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
+        trio,
         ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
         universe.window,
     )
+    if trio.height:
+        _log_ed_lists(config, trio, actions, ed.grant_year_attributes, ed.exceptions.height, pull_date)
     ed.grant_year_attributes.write_parquet(config.layout.joined_table("grant_year_ed_attributes"))
     ed.exceptions.write_parquet(config.layout.joined_table("ed_list_exceptions"))
+
+
+def _log_ed_lists(
+    config: Config, trio: pl.DataFrame, actions: pl.DataFrame, attributes: pl.DataFrame, exceptions: int,
+    pull_date: dt.date,
+) -> None:
+    """Run-log the ED TRIO list rows: each attaches to a Grant-year, is an exception, or matches no Grant-year."""
+    in_usaspending = pl.col("fain").is_in(actions["fain"].unique().implode())
+    not_a_grant_year = trio.filter(in_usaspending).join(
+        attributes.select("fain", "fiscal_year"), on=["fain", "fiscal_year"], how="anti"
+    ).height
+    attached = attributes.filter(pl.col("ed_list_row_id").is_not_null()).height
+    run_log.record(
+        config, layer="join", source="grant_year_ed_attributes", rows_in=trio.height, rows_out=attached,
+        drops={NOT_IN_USASPENDING: exceptions, DROP_ED_ROW_NOT_A_GRANT_YEAR: not_a_grant_year},
+        pull_date=pull_date,
+        input_hash=provenance.file_sha256(config.layout.cleaned_table(ed_grantee_lists.TRIO_TABLE)),
+    )
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
@@ -196,7 +272,7 @@ def report(config: Config) -> Delivered:
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS)
         ),
     )
     readme = ReadmeFacts(

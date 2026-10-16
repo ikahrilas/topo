@@ -33,7 +33,7 @@ def read_manifest(project) -> list[dict[str, str]]:
 
 def fake_usaspending_http(monkeypatch, project):
     """`topo pull usaspending` without the network: one Full archive for FY2027."""
-    project.set_config("pull_from_fy = 2015", "pull_from_fy = 2027")
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
 
     def post_json(url, body):
         name = f"FY{body['fiscal_year']}_091_Assistance_Full_20261006.zip"
@@ -224,8 +224,8 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
 
     project.topo("run", "--as-of", PULL)
 
-    clean, join, report = run_log(project)
-    assert len({clean["run_id"], join["run_id"], report["run_id"]}) == 1
+    clean, join, funding, report = run_log(project)
+    assert len({clean["run_id"], join["run_id"], funding["run_id"], report["run_id"]}) == 1
     assert (clean["layer"], clean["source"]) == ("clean", "usaspending")
     assert (clean["rows_in"], clean["rows_out"]) == (7, 6)
     assert drops(clean) == {"not_a_trio_gear_up_listing": 1}
@@ -235,6 +235,9 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
     assert (join["rows_in"], join["rows_out"]) == (6, 3)
     assert drops(join) == {"fain_prefix_names_no_program": 1, "grant_outside_reporting_window": 2}
     assert join["pull_date"] == dt.date(2026, 10, 7) and len(join["input_hash"]) == 64
+
+    assert (funding["layer"], funding["source"]) == ("join", "grant_funding_status")
+    assert (funding["rows_in"], funding["rows_out"], drops(funding)) == (1, 1, {})
 
     assert (report["layer"], report["source"]) == ("report", "target_list")
     assert (report["rows_in"], report["rows_out"], drops(report)) == (1, 1, {})
@@ -248,8 +251,8 @@ def test_the_run_log_is_append_only(project):
     project.topo("run", "--as-of", PULL)
     second = run_log(project)
 
-    assert len(first) == 3 and second[:3] == first and len(second) == 6
-    assert second[3]["run_id"] != first[0]["run_id"]
+    assert len(first) == 4 and second[:4] == first and len(second) == 8
+    assert second[4]["run_id"] != first[0]["run_id"]
 
 
 def test_a_row_count_mismatch_between_layers_stops_the_run(project):
@@ -342,3 +345,25 @@ def test_a_missing_or_unknown_api_key_is_a_structural_break(project, monkeypatch
     with pytest.raises(StructuralBreak, match="only the Census"):
         api_key(config, "usaspending")
     assert "key-from" not in project.config.read_text()
+
+
+def test_ed_grantee_list_clean_and_join_are_logged_and_their_files_reach_the_sidecar(project):
+    from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
+
+    one_grant(project)  # P047A220001
+    lists = project.root / "data/raw/ed_grantee_lists"
+    write_manifest(lists, [file_list(lists, "ub_84047A", "2024", "ub.pdf", pdf_bytes(trio_pdf_lines(2024, "Upward Bound(UB)", [
+        ("P047A220001", "Example College/ Main", "AK", 60, 300000),   # attaches to a Grant-year
+        ("P047A229999", "Not In USAspending/ Main", "AL", 10, 1000),  # ED-list-only FAIN
+    ])))])
+
+    project.topo("run", "--as-of", PULL)
+
+    logged = {(r["layer"], r["source"]): r for r in run_log(project)}
+    clean = logged[("clean", "ed_trio_list_rows")]
+    assert (clean["rows_in"], clean["rows_out"], drops(clean)) == (2, 2, {})
+    join = logged[("join", "grant_year_ed_attributes")]
+    assert (join["rows_in"], join["rows_out"]) == (2, 1)
+    assert drops(join) == {"ed_list_fain_not_in_usaspending": 1}
+    sidecar = json.loads((project.output / f"target_list_{PULL}.csv.provenance.json").read_text())
+    assert "data/raw/ed_grantee_lists/ub_84047A__FY2024__ub.pdf" in {f["path"] for f in sidecar["raw_files"]}

@@ -3,8 +3,8 @@
 TRIO lists come as PDF (FY2024-25) or XLSX (FY2021-23); GEAR UP lists come as
 one saved HTML page per Program with one table per FY. `file_list` writes a file
 into data/raw/ed_grantee_lists/ and returns its manifest row (with the real
-bytes and SHA-256); `write_manifest` writes the manifest in the committed
-column order.
+bytes and SHA-256); `write_manifest` writes those rows as the one raw manifest,
+data/raw/manifest.csv (source "ed_grantee_lists"), in the committed column order.
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ from pathlib import Path
 
 import openpyxl
 
-MANIFEST_COLUMNS = [
-    "program", "fy", "status", "source_page_url", "file_url", "pull_date", "bytes", "sha256",
-    "original_name", "stored_path", "note",
-]
+from topo.manifest import COLUMNS as MANIFEST_COLUMNS
+
+ED_SOURCE = {
+    "source": "ed_grantee_lists",
+    "licence_citation": "U.S. Department of Education, https://www.ed.gov (U.S. Government work, public domain)",
+}
 FILED = "2026-10-15"
 
 # One TRIO list row: (FAIN, "Recipient/ campus" text, state, participants, amount[, project type])
@@ -109,6 +111,7 @@ def file_list(raw_dir: Path, program: str, fy: str, original_name: str, data: by
     stored = f"{program}__FY{fy}__{original_name}"
     (raw_dir / stored).write_bytes(data)
     return {
+        **ED_SOURCE, "request": "hand-downloaded from source_page_url",
         "program": program, "fy": fy, "status": "ok",
         "source_page_url": f"https://www.ed.gov/{program}", "file_url": f"https://www.ed.gov/media/document/{original_name}",
         "pull_date": FILED, "bytes": str(len(data)), "sha256": hashlib.sha256(data).hexdigest(),
@@ -118,14 +121,16 @@ def file_list(raw_dir: Path, program: str, fy: str, original_name: str, data: by
 
 def known_gap(program: str, fy: str, note: str) -> dict[str, str]:
     return {
+        **ED_SOURCE, "request": "",
         "program": program, "fy": fy, "status": "missing", "source_page_url": "", "file_url": "",
         "pull_date": FILED, "bytes": "", "sha256": "", "original_name": "", "stored_path": "", "note": note,
     }
 
 
 def write_manifest(raw_dir: Path, rows: list[dict[str, str]]) -> Path:
+    """Write `rows` as data/raw/manifest.csv; `raw_dir` is the lists folder data/raw/ed_grantee_lists/."""
     raw_dir.mkdir(parents=True, exist_ok=True)
-    path = raw_dir / "manifest.csv"
+    path = raw_dir.parent / "manifest.csv"
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=MANIFEST_COLUMNS, quoting=csv.QUOTE_ALL)
         writer.writeheader()

@@ -29,7 +29,7 @@ def archive_zip(rows: list[dict]) -> bytes:
 
 
 def test_pull_fetches_full_archives_per_fiscal_year_into_the_pull_date_folder(project):
-    project.set_config("pull_from_fy = 2015", "pull_from_fy = 2026")
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2026")
     payload = archive_zip([action("P047A220001", 1, "2026-05-15", 5, ("2026-09-01", "2027-08-31"))])
     requests: list[dict] = []
 

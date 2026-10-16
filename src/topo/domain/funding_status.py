@@ -328,20 +328,30 @@ class GrantFundingStatus(pa.DataFrameModel):
 
 
 def read_grants_funding_status(
-    grants: pl.DataFrame, grant_actions: pl.DataFrame, windows: ReadWindows, as_of: dt.date
+    grants: pl.DataFrame,
+    grant_actions: pl.DataFrame,
+    windows: ReadWindows,
+    as_of: dt.date,
+    successor_fains: Mapping[str, Iterable[str]] | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Read every Grant: (one row per FAIN and Budget period, one row per FAIN).
 
-    Until Succession links exist (#39), the Succession exclusion is fed every
-    A1 on another FAIN in the Grant universe; the reader matches same day and
-    same amount.
+    The Succession exclusion is fed the A1s of the FAINs linked as each Grant's
+    successors (`successor_fains`, from topo.domain.succession: Succession links
+    and hand-offs); the reader matches same day and same amount. With no links
+    given (None), every A1 on another FAIN is offered.
     """
-    a1s = [
-        OtherA1(fain, day, amount)
-        for fain, day, amount in grant_actions.filter(pl.col("action_type") == "A1")
-        .select("fain", "action_date", "obligation")
-        .iter_rows()
-    ]
+    a1s_by_fain: dict[str, list[OtherA1]] = {}
+    for fain, day, amount in (
+        grant_actions.filter(pl.col("action_type") == "A1").select("fain", "action_date", "obligation").iter_rows()
+    ):
+        a1s_by_fain.setdefault(fain, []).append(OtherA1(fain, day, amount))
+
+    def other_a1s(fain: str) -> list[OtherA1]:
+        if successor_fains is None:
+            return [a for other, a1s in a1s_by_fain.items() if other != fain for a in a1s]
+        return [a for other in sorted(successor_fains.get(fain, ())) if other != fain for a in a1s_by_fain.get(other, [])]
+
     actions_by_fain: dict[str, list[FundingAction]] = {}
     for row in grant_actions.iter_rows(named=True):
         actions_by_fain.setdefault(row["fain"], []).append(
@@ -359,7 +369,7 @@ def read_grants_funding_status(
             actions_by_fain.get(fain, []),
             windows,
             as_of,
-            other_fain_a1s=[a for a in a1s if a.fain != fain],
+            other_fain_a1s=other_a1s(fain),
             expected_budget_periods=windows.expected_budget_periods(family),
         )
         period_rows += [(fain, p.start, p.end, p.status, p.readable_from, p.disrupted) for p in reading.periods]
