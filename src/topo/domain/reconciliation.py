@@ -33,6 +33,7 @@ from typing import Any
 import pandera.polars as pa
 import polars as pl
 
+from topo.domain.funding_status import UNFUNDED
 from topo.domain.programs import GEAR_UP, PROGRAMS, TRIO
 from topo.fiscal import ReportingWindow, fiscal_year, fy_end, fy_label
 from topo.guards import StructuralBreak, check_schema, check_unique
@@ -90,7 +91,7 @@ class Tolerances:
     evidence_large_share_program_fy: float  # ... or above this in any Program x FY
 
     @classmethod
-    def from_config(cls, config) -> "Tolerances":
+    def from_config(cls, config) -> Tolerances:
         tolerances = config.tolerances
         section = config.section("reconciliation")
         return cls(
@@ -137,6 +138,7 @@ class ReconciliationInputs:
     ed_trio_list_rows: pl.DataFrame  # cleaned EdTrioListRows (amounts are used only here)
     ed_gearup_list_rows: pl.DataFrame  # cleaned EdGearUpListRows (new awards)
     ed_list_coverage: pl.DataFrame  # cleaned EdListCoverage: filed or missing per (Program, FY)
+    funding_status: pl.DataFrame  # joined BudgetPeriodFundingStatus (read, never changed here)
 
 
 class EdListFainDifferences(pa.DataFrameModel):
@@ -154,10 +156,35 @@ class EdListFainDifferences(pa.DataFrameModel):
         strict = True
 
 
+class UnfundedEdListEvidence(pa.DataFrameModel):
+    """Unfunded Budget periods with ED-list evidence (on a TRIO list with funding, no USAspending action).
+
+    One row per (Program, FY) with an unfunded Budget period, plus an overall row
+    (program "All Programs", no FY) that is always present. FY is the list year:
+    the FY<N> list funds the N-(N+1) project year, so a Budget period is matched by
+    the calendar year it starts in.
+    """
+
+    program: str
+    fiscal_year: int = pa.Field(nullable=True)
+    unfunded_budget_periods: int = pa.Field(ge=0)
+    with_ed_list_evidence: int = pa.Field(ge=0)
+    share: float = pa.Field(nullable=True)
+    large: bool
+
+    class Config:
+        strict = True
+
+
 @dataclass(frozen=True)
 class ReconciliationResult:
     table: pl.DataFrame
     ed_list_fain_differences: pl.DataFrame
+    unfunded_ed_list_evidence: pl.DataFrame
+
+    @property
+    def evidence_is_large(self) -> bool:
+        return bool(self.unfunded_ed_list_evidence["large"].any())
 
 
 def _money(value: float | None) -> str:
@@ -402,6 +429,38 @@ def _ed_lists_vs_usaspending(
     return rows, differences
 
 
+def count_unfunded_ed_list_evidence(inputs: ReconciliationInputs, tolerances: Tolerances) -> pl.DataFrame:
+    """Count and share of unfunded Budget periods that an ED list shows as funded. Funding status is unchanged."""
+    funded_on_list = inputs.ed_trio_list_rows.filter(pl.col("ed_amount") > 0).select(
+        "fain", pl.col("fiscal_year").cast(pl.Int64).alias("list_year"), pl.lit(True).alias("evidence")
+    ).unique()
+    unfunded = (
+        inputs.funding_status.filter(pl.col("funding_status") == UNFUNDED)
+        .join(inputs.grants.select("fain", "program"), on="fain")
+        .with_columns(pl.col("budget_period_start").dt.year().cast(pl.Int64).alias("list_year"))
+        .join(funded_on_list, on=["fain", "list_year"], how="left")
+        .with_columns(pl.col("evidence").fill_null(False))
+    )
+    per_program = (
+        unfunded.group_by("program", pl.col("list_year").alias("fiscal_year"))
+        .agg(pl.len().cast(pl.Int64).alias("unfunded_budget_periods"),
+             pl.col("evidence").sum().cast(pl.Int64).alias("with_ed_list_evidence"))
+        .with_columns((pl.col("with_ed_list_evidence") / pl.col("unfunded_budget_periods")).alias("share"))
+        .with_columns((pl.col("share") > tolerances.evidence_large_share_program_fy).alias("large"))
+        .select(list(UnfundedEdListEvidence.to_schema().columns))
+        .sort("program", "fiscal_year")
+    )
+    total, evidence = unfunded.height, int(unfunded["evidence"].sum())
+    share = evidence / total if total else None
+    overall = pl.DataFrame(
+        {"program": [ALL_PROGRAMS], "fiscal_year": [None], "unfunded_budget_periods": [total],
+         "with_ed_list_evidence": [evidence], "share": [share],
+         "large": [share is not None and share >= tolerances.evidence_large_share_overall]},
+        schema=per_program.schema,
+    )
+    return check_schema(UnfundedEdListEvidence, pl.concat([per_program, overall]), "unfunded ED-list evidence")
+
+
 def build_reconciliation(inputs: ReconciliationInputs, tolerances: Tolerances) -> ReconciliationResult:
     """Every check for every Program and reporting-window FY. A duplicate key stops the run."""
     by_fain = _usaspending_by_fy(inputs, inputs.grant_actions)
@@ -424,4 +483,8 @@ def build_reconciliation(inputs: ReconciliationInputs, tolerances: Tolerances) -
          *differences]
     ).sort("program", "fiscal_year", "fain")
     fain_differences = check_schema(EdListFainDifferences, fain_differences, "ED list FAIN differences")
-    return ReconciliationResult(table=table, ed_list_fain_differences=fain_differences)
+    return ReconciliationResult(
+        table=table,
+        ed_list_fain_differences=fain_differences,
+        unfunded_ed_list_evidence=count_unfunded_ed_list_evidence(inputs, tolerances),
+    )

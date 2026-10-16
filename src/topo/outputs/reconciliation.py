@@ -55,3 +55,21 @@ def write_reconciliation_csv(table: pl.DataFrame, output_dir: Path, pull_date: d
     path = delivery_path(output_dir, STEM, pull_date, "csv")
     write_new(path, reconciliation_display(table).write_csv().encode())
     return path
+
+
+def evidence_display(evidence: pl.DataFrame) -> pl.DataFrame:
+    return evidence.select(
+        pl.col("program").alias("Program"),
+        pl.when(pl.col("fiscal_year").is_null()).then(pl.lit("")).otherwise(pl.format("FY{}", pl.col("fiscal_year")))
+        .alias("FY"),
+        pl.col("unfunded_budget_periods").alias("Unfunded Budget periods"),
+        pl.col("with_ed_list_evidence").alias("With ED-list evidence"),
+        pl.col("share").map_elements(lambda v: f"{v:.4f}", return_dtype=pl.String).alias("Share"),
+        pl.when(pl.col("large")).then(pl.lit("yes")).otherwise(pl.lit("no")).alias("Large"),
+    )
+
+
+def write_evidence_csv(evidence: pl.DataFrame, output_dir: Path, pull_date: dt.date) -> Path:
+    path = delivery_path(output_dir, EVIDENCE_STEM, pull_date, "csv")
+    write_new(path, evidence_display(evidence).write_csv().encode())
+    return path

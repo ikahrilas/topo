@@ -29,7 +29,7 @@ from topo.domain.reconciliation import (
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
-from topo.outputs.reconciliation import write_reconciliation_csv
+from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.target_list import build_target_list, write_target_list_csv
 from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
 
@@ -43,6 +43,7 @@ FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
 GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
 RECONCILIATION = "reconciliation"  # one row per (check, Program, FY)
 ED_LIST_FAIN_DIFFERENCES = "ed_list_fain_differences"  # TRIO ED-list rows that disagree with USAspending, by FAIN
+UNFUNDED_ED_LIST_EVIDENCE = "unfunded_ed_list_evidence"  # per (Program, FY) plus an overall row
 
 
 @dataclass(frozen=True)
@@ -204,6 +205,7 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         ed_trio_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
         ed_gearup_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.GEARUP_TABLE),
         ed_list_coverage=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
+        funding_status=pl.read_parquet(config.layout.joined_table(FUNDING_STATUS)),
     )
     result = build_reconciliation(inputs, Tolerances.from_config(config))
     table = result.table
@@ -217,6 +219,13 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         warn(f"{misses.height} reconciliation rows do not reconcile ({named})")
     table.write_parquet(config.layout.joined_table(RECONCILIATION))
     result.ed_list_fain_differences.write_parquet(config.layout.joined_table(ED_LIST_FAIN_DIFFERENCES))
+    result.unfunded_ed_list_evidence.write_parquet(config.layout.joined_table(UNFUNDED_ED_LIST_EVIDENCE))
+    if result.evidence_is_large:
+        overall = result.unfunded_ed_list_evidence.filter(pl.col("fiscal_year").is_null()).row(0, named=True)
+        warn(
+            f"{overall['with_ed_list_evidence']} of {overall['unfunded_budget_periods']} unfunded Budget periods "
+            "are funded on an ED grantee list: unfunded status partly reflects USAspending reporting gaps"
+        )
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
@@ -270,6 +279,9 @@ def _report_reconciliation(config: Config, context: RunContext) -> Path:
     )
     path = write_reconciliation_csv(table, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
+    evidence = pl.read_parquet(config.layout.joined_table(UNFUNDED_ED_LIST_EVIDENCE))
+    evidence_path = write_evidence_csv(evidence, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, evidence_path, as_of=context.as_of, pull_date=context.pull_date)
     return path
 
 

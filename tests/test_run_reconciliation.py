@@ -4,8 +4,21 @@ from __future__ import annotations
 
 import polars as pl
 from conftest import REPO_ROOT
-from support.curated import ALLOCATION_COLUMNS, APPROPRIATION_COLUMNS, allocation, research_figures, write_curated
-from support.ed_lists import file_list, gearup_html_bytes, known_gap, pdf_bytes, trio_pdf_lines, write_manifest
+from support.curated import (
+    ALLOCATION_COLUMNS,
+    APPROPRIATION_COLUMNS,
+    allocation,
+    research_figures,
+    write_curated,
+)
+from support.ed_lists import (
+    file_list,
+    gearup_html_bytes,
+    known_gap,
+    pdf_bytes,
+    trio_pdf_lines,
+    write_manifest,
+)
 from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
@@ -176,6 +189,58 @@ def test_ed_list_differences_are_kept_by_fain(project):
         ("Upward Bound", 2025, "P047A220187", "amount_difference", 362_000.0, 362_438.0),
         ("Upward Bound", 2025, "P047A229999", "ed_list_only", 300_000.0, None),
     ]
+
+
+EVIDENCE = f"unfunded_ed_list_evidence_{PULL}.csv"
+
+
+def test_unfunded_budget_periods_with_ed_list_evidence_are_counted_and_funding_status_is_unchanged(project):
+    # Both Upward Bound Grants have no action for the Budget period starting 2025-09-01 (unfunded by 2025-11-30);
+    # the FY2025 list (2025-26 project year) shows funding for one of them.
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 3) + grant("P047A221553", 2022, 3))
+    lists = project.root / "data" / "raw" / "ed_grantee_lists"
+    write_manifest(lists, [
+        file_list(lists, "ub_84047A", "2025", "ub2025.pdf", pdf_bytes(trio_pdf_lines(2025, "Upward Bound", [
+            ("P047A220845", "University of South Florida/ Tampa", "FL", 60, 100_000),
+        ]))),
+    ])
+
+    result = project.topo("run", "--as-of", PULL)
+
+    evidence = {(r["Program"], r["FY"]): r for r in project.read_csv(EVIDENCE)}
+    assert {key: (r["Unfunded Budget periods"], r["With ED-list evidence"], r["Share"], r["Large"])
+            for key, r in evidence.items()} == {
+        ("Upward Bound", "FY2025"): ("2", "1", "0.5000", "yes"),
+        ("All Programs", ""): ("2", "1", "0.5000", "yes"),
+    }
+    assert "USAspending reporting gaps" in result.output
+    periods = pl.read_parquet(project.root / "data" / "joined" / "funding_status.parquet")
+    status = {(f, s.isoformat()): v for f, s, v in periods.select("fain", "budget_period_start", "funding_status").rows()}
+    assert status[("P047A220845", "2025-09-01")] == "unfunded"
+    assert status[("P047A221553", "2025-09-01")] == "unfunded"
+
+
+def test_the_evidence_count_is_reported_even_when_nothing_is_unfunded(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 4))
+
+    project.topo("run", "--as-of", PULL)
+
+    assert [(r["Program"], r["Unfunded Budget periods"], r["With ED-list evidence"], r["Share"], r["Large"])
+            for r in project.read_csv(EVIDENCE)] == [("All Programs", "0", "0", "", "no")]
+
+
+def test_a_duplicate_reconciliation_key_stops_the_run_and_misses_only_warn(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 4))
+    write_curated(project.root, [], [allocation("McNair", 2023, 5_000_000), allocation("McNair", 2023, 5_000_000)])
+
+    result = project.topo("run", "--as-of", PULL, expect_exit=2)
+
+    assert "Structural break: duplicate check/program/fiscal_year in the reconciliation table" in result.output
+    assert "ed_allocation_dollars/McNair/2023" in result.output
+
+    write_curated(project.root, [], [allocation("McNair", 2023, 5_000_000)])
+    result = project.topo("run", "--as-of", PULL)
+    assert "Warning:" in result.output and "unexplained" in result.output
 
 
 def test_the_committed_curated_files_have_their_schema_headers():
