@@ -84,6 +84,16 @@ _Avoid_: Validated, matched (those name Host linking and FAIN joins)
 The closed-vocabulary label on a reconciliation row that does not reconcile, such as `not_published`, `timing_difference`, `no_ed_list`, `provisional`, or `unexplained`; each carries a cited note.
 _Avoid_: Error, discrepancy
 
+## Outputs
+
+**Priority tier**:
+The call-order bucket on each target-list row: 1 new within 3 months of the award, 2 re-competing soon, 3 continuing, 4 unfunded or reversed. It sets the default sort, and tier 4 is shown with its reason so it never reads as a call list.
+_Avoid_: Score, rank (there is no numeric ranking)
+
+**Review finding**:
+One row in the write-once file that records a spot-check mark (`wrong`, `stale`, or a Missing Grant) with the field named and a short note; the reviewer is recorded only as `founder`. A finding never changes the overrides file by itself.
+_Avoid_: Override (that is a reviewed FAIN → Host decision), feedback
+
 ## Provenance
 
 **Pull date**:
