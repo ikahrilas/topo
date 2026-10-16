@@ -466,3 +466,11 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     gearup_rows.write_parquet(layout.cleaned_table(GEARUP_TABLE))
     list_coverage.write_parquet(layout.cleaned_table(COVERAGE_TABLE))
     return trio_rows
+
+
+def read_cleaned(config: Config, table: str) -> pl.DataFrame:
+    """One cleaned ED-list table (TRIO_TABLE, GEARUP_TABLE or COVERAGE_TABLE)."""
+    path = config.layout.cleaned_table(table)
+    if not path.exists():
+        raise StructuralBreak(f"cleaned ED grantee lists missing; run `topo clean {SOURCE}` first ({path})")
+    return pl.read_parquet(path)

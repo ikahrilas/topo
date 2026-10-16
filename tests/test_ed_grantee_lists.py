@@ -16,6 +16,7 @@ from support.ed_lists import (
     trio_xlsx_bytes,
     write_manifest,
 )
+from support.usaspending import action, write_actions
 
 UB_FY2024 = [
     ("P047A221553", "University of Alaska/ Anchorage", "AK", 60, 309505),
@@ -187,3 +188,73 @@ def test_gear_up_pages_give_new_awards_per_fy_and_years_without_a_table_are_miss
     ]
     coverage = cleaned(project, "ed_list_coverage").sort("fiscal_year")
     assert coverage.select("fiscal_year", "status").rows() == [(2023, "ok"), (2024, "missing"), (2025, "ok")]
+
+
+# ------------------------------------------------------------ joined with USAspending
+
+PULL = "2026-10-07"
+ED_ONLY_AMOUNT = 777123  # distinctive ED-list amounts, so the target list can be searched for them
+
+
+def grant(fain: str, start_fy: int, years: int, amount: float = 100000) -> list[dict]:
+    return [
+        action(fain, i + 1, f"{start_fy + i}-05-15", amount, (f"{start_fy + i}-09-01", f"{start_fy + i + 1}-08-31"),
+               action_type="A1" if i == 0 else "B1")
+        for i in range(years)
+    ]
+
+
+def joined(project, name):
+    return pl.read_parquet(project.root / "data" / "joined" / f"{name}.parquet")
+
+
+@pytest.fixture
+def ub_grant_with_lists(project, no_network):
+    """An Upward Bound Grant (FY2022-FY2025 actions) on the FY2024 list only; FY2021-23 are known gaps."""
+    write_actions(project.raw_usaspending, PULL, grant("P047A221553", 2022, 4))
+    lists = raw_dir(project)
+    write_manifest(lists, [
+        file_list(lists, "ub_84047A", "2024", "ub.pdf", ub_pdf([
+            ("P047A221553", "University of Alaska/ Anchorage", "AK", 60, ED_ONLY_AMOUNT),
+            ("P047A229999", "Never Funded College/ North", "AK", 75, ED_ONLY_AMOUNT + 1),  # not in USAspending
+        ])),
+        *(known_gap("ub_84047A", str(fy), f"known gap: no FY{fy} list") for fy in (2021, 2022, 2023)),
+    ])
+    project.topo("run", "--as-of", PULL)
+    return project
+
+
+def test_campus_text_and_participants_are_grant_year_attributes_blank_in_years_without_a_list(ub_grant_with_lists):
+    attrs = joined(ub_grant_with_lists, "grant_year_ed_attributes").filter(pl.col("fain") == "P047A221553")
+
+    by_fy = {r["fiscal_year"]: r for r in attrs.to_dicts()}
+    assert sorted(by_fy) == [2021, 2022, 2023, 2024, 2025, 2026]  # the reporting window
+    assert by_fy[2024]["ed_recipient_campus"] == "University of Alaska/ Anchorage"
+    assert by_fy[2024]["ed_campus"] == "Anchorage"
+    assert by_fy[2024]["ed_participants"] == 60
+    assert by_fy[2024]["ed_list_row_id"] == "ub_84047A:FY2024:1"
+    for fy in (2021, 2022, 2023, 2025, 2026):
+        assert by_fy[fy]["ed_participants"] is None, fy  # blank, not zero
+        assert by_fy[fy]["ed_recipient_campus"] is None, fy
+    assert [by_fy[fy]["ed_list_filed"] for fy in sorted(by_fy)] == [False, False, False, True, False, False]
+    assert not any("amount" in column for column in attrs.columns)
+
+
+def test_ed_list_amounts_do_not_appear_on_the_target_list(ub_grant_with_lists):
+    text = next(ub_grant_with_lists.output.glob("target_list_*.csv")).read_text()
+
+    assert str(ED_ONLY_AMOUNT) not in text
+    assert f"{ED_ONLY_AMOUNT:,}" not in text
+    assert "100000" in text  # the USAspending obligations are there
+
+
+def test_a_fain_only_on_an_ed_list_is_an_exception_not_a_grant(ub_grant_with_lists):
+    project = ub_grant_with_lists
+
+    assert joined(project, "grants")["fain"].to_list() == ["P047A221553"]
+    assert "P047A229999" not in joined(project, "grant_year_ed_attributes")["fain"].to_list()
+    assert "P047A229999" not in {r["FAIN"] for r in project.read_csv(f"target_list_{PULL}.csv")}
+    exceptions = joined(project, "ed_list_exceptions")
+    assert exceptions.select("fain", "program", "fiscal_year", "list_row_id", "reason").rows() == [
+        ("P047A229999", "Upward Bound", 2024, "ub_84047A:FY2024:2", "ed_list_fain_not_in_usaspending"),
+    ]

@@ -19,7 +19,8 @@ from topo.domain.grant_universe import GrantUniverse, build_grant_universe
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak
 from topo.outputs.target_list import build_target_list, write_target_list_csv
-from topo.sources import SOURCES, usaspending
+from topo.domain.ed_lists import join_ed_lists
+from topo.sources import SOURCES, ed_grantee_lists, usaspending
 
 RUN_CONTEXT = "run_context.json"
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
@@ -81,8 +82,22 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
+    _join_ed_lists(config, universe, actions)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
+
+
+def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame) -> None:
+    """Grant-year ED-list attributes and ED-list-only FAIN exceptions (joined layer)."""
+    ed = join_ed_lists(
+        universe.grants,
+        actions["fain"].unique(),
+        ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
+        ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
+        universe.window,
+    )
+    ed.grant_year_attributes.write_parquet(config.layout.joined_table("grant_year_ed_attributes"))
+    ed.exceptions.write_parquet(config.layout.joined_table("ed_list_exceptions"))
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
