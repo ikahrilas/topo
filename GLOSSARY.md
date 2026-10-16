@@ -84,6 +84,16 @@ _Avoid_: Validated, matched (those name Host linking and FAIN joins)
 The closed-vocabulary label on a reconciliation row that does not reconcile, such as `not_published`, `timing_difference`, `no_ed_list`, `provisional`, or `unexplained`; each carries a cited note.
 _Avoid_: Error, discrepancy
 
+## Provenance
+
+**Pull date**:
+The date a raw file or API response was fetched, recorded for every source.
+_Avoid_: Download date, refresh date
+
+**As-of date**:
+The date a run reads the data as of. Funding status and "not yet readable" are judged against it, so every output states it.
+_Avoid_: Run date, today
+
 ## Language notes
 
 "Grantee" is fine in conversation and plain-language writing, where it loosely means the Recipient. In data, matching, and specs, use Recipient, Grant, or Host institution.
