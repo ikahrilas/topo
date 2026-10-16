@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from topo import pipeline
+from topo import manifest, pipeline
 from topo.config import Config, load_config
 from topo.guards import StructuralBreak
 from topo.sources import SOURCES
@@ -63,8 +63,12 @@ def pull(
             raise StructuralBreak(f"source {source!r} cannot be pulled")
         # The Pull date is the fetch date, so this is the one place the clock is read.
         when = _date(pull_date) or dt.date.today()
-        for pulled in module.pull(_config(), when):
+        config = _config()
+        pulled_files = module.pull(config, when)
+        for pulled in pulled_files:
             typer.echo(f"pulled {pulled.path} ({pulled.bytes} bytes, sha256 {pulled.sha256})")
+        written = manifest.append(config, pulled_files)
+        typer.echo(f"appended {written} rows to {manifest.manifest_path(config)}")
 
     _guarded(go)
 
