@@ -16,10 +16,12 @@ import polars as pl
 
 from topo import provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
+from topo.domain.funding_status import ReadWindows, read_grants_funding_status
 from topo.domain.grant_universe import EXCEPTION_UNKNOWN_FAIN_PREFIX, GrantUniverse, build_grant_universe
 from topo.domain.host_linking import HostLookups, build_host_links
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
+from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.target_list import build_target_list, write_target_list_csv
 from topo.sources import SOURCES, ipeds, usaspending
 
@@ -28,6 +30,8 @@ DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
 HOST_LINKS = "host_links"  # one row per FAIN: outcome, Case label, Host, Host confidence
 HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its signals
+FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
+GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     )
     host_links.write_parquet(config.layout.joined_table(HOST_LINKS))
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
+    _join_funding_status(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
 
@@ -116,6 +121,16 @@ def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pu
         pull_date=pull_date,
         input_hash=provenance.file_sha256(config.layout.cleaned_table(usaspending.CLEANED_TABLE)),
     )
+
+
+def _join_funding_status(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Read Funding status under the As-of date, write it to the joined layer, append the history."""
+    periods, per_grant = read_grants_funding_status(
+        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of
+    )
+    periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
+    per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
+    append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
 
 
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
@@ -143,12 +158,14 @@ class Delivered:
 def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
-    rows = build_target_list(universe, context.as_of, host_links=host_links)
+    funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
+    rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
-            provenance.file_sha256(config.layout.joined_table(name)) for name in (*JOINED_TABLES, HOST_LINKS)
+            provenance.file_sha256(config.layout.joined_table(name))
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
         ),
     )
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
