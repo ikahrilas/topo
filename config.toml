@@ -135,3 +135,12 @@ agency_types = [1, 2, 4, 5, 7]
 # about 1.4 GB. Public domain. docs/research/federal-audit-clearinghouse.md.
 federal_awards_url = "https://app.fac.gov/dissemination/public-data/gsa/full/federal_awards.csv"
 general_url = "https://app.fac.gov/dissemination/public-data/gsa/full/general.csv"
+# Plausibility check (#43): FAC direct-line amount expended vs USAspending
+# obligations per (Recipient UEI, listing), summed over `plausibility_years`
+# fiscal years ending `audit_lag_years` before the last ended FY (the latest audit
+# year is still being filed). Ratios outside [low, high] are flagged `review`;
+# nothing passes or fails. ASSUMPTION: 5 years, 0.5 / 1.5, one-year lag.
+plausibility_years = 5
+audit_lag_years = 1
+plausibility_ratio_low = 0.5
+plausibility_ratio_high = 1.5

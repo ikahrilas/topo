@@ -17,6 +17,7 @@ import polars as pl
 
 from topo import curated, curated_totals, provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
+from topo.domain.fac_plausibility import PlausibilitySettings, Span, build_fac_plausibility
 from topo.domain.ed_lists import NOT_IN_USASPENDING, join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
 from topo.domain.grant_universe import (
@@ -53,10 +54,11 @@ from topo.outputs.target_list import (
     provisional_fiscal_years,
     write_target_list,
 )
+from topo.outputs.fac_plausibility import write_plausibility_csv
 from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
-from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
+from topo.sources import SOURCES, ccd, ed_grantee_lists, fac, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
@@ -71,6 +73,7 @@ GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
 RECONCILIATION = "reconciliation"  # one row per (check, Program, FY)
 ED_LIST_FAIN_DIFFERENCES = "ed_list_fain_differences"  # TRIO ED-list rows that disagree with USAspending, by FAIN
 UNFUNDED_ED_LIST_EVIDENCE = "unfunded_ed_list_evidence"  # per (Program, FY) plus an overall row
+FAC_PLAUSIBILITY = "fac_plausibility"  # per (Recipient UEI, listing): plausibility, not reconciliation
 # Succession and lookback (#39). Lookback Grants feed only these tables, never amounts or reconciliation.
 LOOKBACK_GRANTS = "lookback_grants"  # Grants that ended before the window, back to the lookback horizon
 LOOKBACK_HOST_LINKS = "lookback_host_links"
@@ -147,6 +150,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     _join_funding_status(config, universe, context, successors)
     _join_ed_lists(config, universe, actions, pull_date)
     _join_reconciliation(config, universe, context)
+    _join_fac_plausibility(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
 
@@ -315,6 +319,27 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         )
 
 
+def _join_fac_plausibility(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Compare FAC direct lines with USAspending per (UEI, listing); flags only, never pass/fail."""
+    lines = fac.read_award_lines(config)
+    check_layer_handoff(
+        "join", lines.height, "clean", run_log.last_rows_out(config, "clean", fac.AWARD_LINES_TABLE),
+        fac.AWARD_LINES_TABLE,
+    )
+    settings = PlausibilitySettings.from_section(config.section("fac"))
+    result = build_fac_plausibility(
+        universe.grants, universe.fy_obligations, lines, fac.read_audits(config),
+        Span.of(universe.window, settings), settings,
+    )
+    if lines.height:
+        run_log.record(
+            config, layer="join", source=FAC_PLAUSIBILITY, rows_in=result.lines_in, rows_out=result.lines_compared,
+            drops=result.drops, pull_date=context.pull_date,
+            input_hash=provenance.file_sha256(config.layout.cleaned_table(fac.AWARD_LINES_TABLE)),
+        )
+    result.table.write_parquet(config.layout.joined_table(FAC_PLAUSIBILITY))
+
+
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
     joined = config.layout.joined
     context_path = joined / RUN_CONTEXT
@@ -339,6 +364,7 @@ class Delivered:
     review_queue_csv: Path
     match_quality: Path
     reconciliation_csv: Path
+    fac_plausibility_csv: Path
 
 
 def report(config: Config) -> Delivered:
@@ -397,9 +423,12 @@ def report(config: Config) -> Delivered:
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, quality_path, as_of=context.as_of, pull_date=context.pull_date)
     reconciliation_csv = _report_reconciliation(config, context)
+    plausibility = pl.read_parquet(config.layout.joined_table(FAC_PLAUSIBILITY))
+    plausibility_csv = write_plausibility_csv(plausibility, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, plausibility_csv, as_of=context.as_of, pull_date=context.pull_date)
     return Delivered(
         target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
-        reconciliation_csv=reconciliation_csv,
+        reconciliation_csv=reconciliation_csv, fac_plausibility_csv=plausibility_csv,
     )
 
 
