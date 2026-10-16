@@ -11,6 +11,7 @@ import re
 
 import pdfplumber
 from support.markdown import prose, sections, table
+from support.curated_totals import allocation, write_curated
 from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
 from support.usaspending import action, write_actions
 
@@ -186,3 +187,46 @@ def test_with_nothing_re_competing_the_section_says_so(project):
     assert table(text, "What's coming up") == []
     assert "No Program has Grants re-competing" in prose(text, "What's coming up")
     assert "No new Grants" in prose(text, "New Grants in the last 3 months")
+
+
+def test_how_far_to_trust_this_has_at_most_8_one_sentence_items_and_names_never_funded_applications(project):
+    write_actions(project.raw_usaspending, PULL, DISRUPTED)
+
+    project.topo("run", "--as-of", PULL)
+
+    items = trust_items(one_pager(project))
+    assert 1 <= len(items) <= 8
+    for item in items:
+        assert item.endswith(".") and not re.search(r"\.\s", item), item
+    [blind_spot] = [item for item in items if "never funded" in item]
+    assert "blind spot" in blind_spot.lower()
+
+
+def test_every_unexplained_reconciliation_row_is_named(project):
+    write_actions(project.raw_usaspending, PULL, [
+        *grant("P044A210001", 2021, 6, amount=250_000), *grant("P217A210001", 2021, 6, amount=200_000),
+    ])
+    write_curated(project.root, [], [
+        allocation("Talent Search", 2024, 5_000_000),  # $250K in USAspending: unexplained
+        allocation("McNair", 2023, 9_000_000),  # $200K in USAspending: unexplained
+        allocation("McNair", 2022, 1_000_000),  # within $1M: reconciled
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    text = one_pager(project)
+    [item] = [item for item in trust_items(text) if "unexplained" in item]
+    assert item.startswith("2 reconciliation rows are unexplained")
+    assert "Talent Search FY2024 ed_allocation_dollars" in item
+    assert "McNair FY2023 ed_allocation_dollars" in item
+    assert "McNair FY2022" not in item
+    assert "unexplained" in marked(prose(text, "What's out there"), "checked", text)
+
+
+def test_with_no_unexplained_rows_the_trust_item_says_none_are(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 5))
+
+    project.topo("run", "--as-of", PULL)
+
+    [item] = [item for item in trust_items(one_pager(project)) if "unexplained" in item]
+    assert item.startswith("No reconciliation row is unexplained")

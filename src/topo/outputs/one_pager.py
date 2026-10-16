@@ -18,6 +18,7 @@ import polars as pl
 
 from topo.domain.funding_status import DISRUPTION_RESTORED, FUNDED_LATE, REVERSED, UNFUNDED, add_months
 from topo.domain.programs import PROGRAMS
+from topo.domain.reconciliation import EXCEEDS_APPROPRIATION_UNEXPLAINED, UNEXPLAINED
 from topo.fiscal import ReportingWindow, fy_label
 from topo.outputs.delivery import delivery_paths, write_new
 from topo.outputs.pdf import render_pdf
@@ -33,6 +34,8 @@ DISRUPTION_PATTERNS = (UNFUNDED, FUNDED_LATE, REVERSED)
 PROVISIONAL = "provisional"
 PATTERN = "pattern"
 UNTESTED = "untested"
+CHECKED = "checked"
+BLIND_SPOT = "blind spot"
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,7 @@ class OnePagerInputs:
     timing: pl.DataFrame | None = None  # joined renewal_timing: Re-competing soon, Predicted due date, evidence tier
     new_award_months: int = 3  # [target_list] new_award_months
     lead_months: int = 12  # [renewal_timing] lead_months
+    reconciliation: pl.DataFrame | None = None  # joined reconciliation table
 
 
 @dataclass(frozen=True)
@@ -96,19 +100,38 @@ class TrustItems:
 
 
 def money(value: float) -> str:
-    """Short dollars: $250K, $1.5M, $1.14B."""
-    if abs(value) >= 1e9:
-        return f"${value / 1e9:,.2f}B"
-    if abs(value) >= 1e6:
-        return f"${value / 1e6:,.1f}M"
-    return f"${value / 1e3:,.0f}K"
+    """Short dollars: $250K, $1.5M, $1.14B, -$4.8M."""
+    sign, value = ("-" if value < 0 else ""), abs(value)
+    if value >= 1e9:
+        return f"{sign}${value / 1e9:,.2f}B"
+    if value >= 1e6:
+        return f"{sign}${value / 1e6:,.1f}M"
+    return f"{sign}${value / 1e3:,.0f}K"
+
+
+def _unexplained_item(inputs: OnePagerInputs) -> str:
+    """Every unexplained reconciliation row, named in one sentence."""
+    table = inputs.reconciliation
+    rows = [] if table is None else table.filter(
+        pl.col("gap_reason_code").is_in([UNEXPLAINED, EXCEEDS_APPROPRIATION_UNEXPLAINED])
+    ).sort("program", "fiscal_year", "check").to_dicts()
+    file = f"reconciliation_{inputs.pull_date.isoformat()}.csv"
+    if not rows:
+        return (f"No reconciliation row is unexplained: against ED's totals and grantee lists every row in {file} "
+                "reconciles, has a stated reason, or could not be compared.")
+    named = "; ".join(
+        f"{r['program']} {fy_label(r['fiscal_year'])} {r['check']}"
+        + ("" if r["gap"] is None else f" (gap {money(r['gap'])})")
+        for r in rows
+    )
+    return f"{len(rows)} reconciliation rows are unexplained, with no reason found for the gap ({file}): {named}."
 
 
 def _trust_items(inputs: OnePagerInputs) -> TrustItems:
     items: list[tuple[str, str]] = []
     if inputs.provisional_fys:
         years = ", ".join(fy_label(fy) for fy in inputs.provisional_fys)
-        awaited = "".join(f"; {program}: {note}" for program, note in sorted(inputs.awaited.items()))
+        awaited = "".join(f" ({program}: {note})" for program, note in sorted(inputs.awaited.items()))
         items.append((PROVISIONAL, (
             f"{years} is provisional (as of {inputs.pull_date.isoformat()}; reporting lag): USAspending is still "
             f"catching up until {inputs.provisional_lag_days} days after the year ends{awaited}."
@@ -120,6 +143,11 @@ def _trust_items(inputs: OnePagerInputs) -> TrustItems:
     items.append((UNTESTED, (
         "Predicted due dates are predictions not yet tested: each is the prior Cohort's published deadline plus "
         "60 months (or a deadline already published), and the rule's backtest has not been scored."
+    )))
+    items.append((CHECKED, _unexplained_item(inputs)))
+    items.append((BLIND_SPOT, (
+        "Blind spot: applications that were never funded have no FAIN, so they are not Grants and appear nowhere "
+        "here; this covers funded Grants only."
     )))
     return TrustItems(items)
 
@@ -146,7 +174,7 @@ def _whats_out_there(inputs: OnePagerInputs, trust: TrustItems) -> list[str]:
     out = [
         f"Grants funded and dollars obligated per fiscal year, by Program, {fy_label(fys[0])} to {fy_label(fys[-1])} "
         "(USAspending obligations by action date; a Grant counts in a year when its net obligation that year is "
-        "positive).",
+        f"positive), checked against ED's published totals {trust.marker(CHECKED, 'checked')}.",
         "",
     ]
     out += _table(["Program", *header], [[name, *(cells.get((name, fy), "-") for fy in fys)] for name in names])

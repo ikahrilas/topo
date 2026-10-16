@@ -477,6 +477,7 @@ def _report_one_pager(
         timing=pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING)),
         new_award_months=settings.new_award_months,
         lead_months=RenewalSettings.from_config(config).lead_months,
+        reconciliation=pl.read_parquet(config.layout.joined_table(RECONCILIATION)),
     ))
     files = write_one_pager(text, config.layout.output, context.pull_date)
     for path in (files.markdown, files.pdf):
