@@ -87,11 +87,13 @@ def join(as_of: AsOf = None) -> None:
 def report() -> None:
     """Write the outputs from the joined layer."""
     delivered = _guarded(lambda: pipeline.report(_config()))
-    typer.echo(f"wrote {delivered.target_list_csv}")
+    for path in (delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
+        typer.echo(f"wrote {path}")
 
 
 @app.command()
 def run(as_of: AsOf = None) -> None:
     """Clean every source, join and report in one go."""
     delivered = _guarded(lambda: pipeline.run(_config(), _date(as_of)))
-    typer.echo(f"wrote {delivered.target_list_csv}")
+    for path in (delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
+        typer.echo(f"wrote {path}")

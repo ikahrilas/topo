@@ -63,3 +63,14 @@ disruption_window_end = 2026-09-30
 # Erring short avoids calling a planned final year "unfunded".
 TRIO = 5
 "GEAR UP" = 6
+
+[host_linking]
+# Case-label gating on the frozen answer key (ADR 0002). A label that decides
+# automatically is auto-accepted at >= auto_accept_accuracy with at least
+# auto_accept_min_checks checks, demoted to review below the bar, and reported
+# "unverified" (its rule outcome kept) under the minimum. ASSUMPTION: 95% / 10.
+auto_accept_accuracy = 0.95
+auto_accept_min_checks = 10
+# Once the answer key in data/curated/host_answer_key.csv is labelled, pin its
+# sha256 here; any later edit to the frozen key then stops the run. "" = not pinned.
+answer_key_sha256 = ""
