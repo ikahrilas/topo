@@ -6,8 +6,10 @@ the auditee contact columns (names, emails, phones) that the pipeline must never
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 
+import polars as pl
 from support.ipeds import write_csv
 
 FEDERAL_AWARDS_CSV = "federal_awards.csv"
@@ -83,3 +85,19 @@ def write_fac(root: Path, pull_date: str, lines: list[dict[str, str]], audits: l
     write_csv(folder / FEDERAL_AWARDS_CSV, FEDERAL_AWARDS_COLUMNS, lines)
     write_csv(folder / GENERAL_CSV, GENERAL_COLUMNS, audits)
     return folder
+
+
+def cleaned_audits(*auditees: tuple[str, str, str], audit_year: int = 2024) -> pl.DataFrame:
+    """A cleaned `fac_audits` frame: one audit per (auditee UEI, auditee name, auditee state)."""
+    return pl.DataFrame(
+        [
+            {"report_id": f"{audit_year}-06-GSAFAC-{uei}", "auditee_uei": uei, "auditee_name": name,
+             "auditee_state": state, "entity_type": "higher-ed", "audit_year": audit_year,
+             "fy_start_date": dt.date(audit_year - 1, 7, 1), "fy_end_date": dt.date(audit_year, 6, 30),
+             "raw_file": "general.csv", "pull_date": dt.date(2026, 10, 7)}
+            for uei, name, state in auditees
+        ],
+        schema={"report_id": pl.String, "auditee_uei": pl.String, "auditee_name": pl.String,
+                "auditee_state": pl.String, "entity_type": pl.String, "audit_year": pl.Int64,
+                "fy_start_date": pl.Date, "fy_end_date": pl.Date, "raw_file": pl.String, "pull_date": pl.Date},
+    )

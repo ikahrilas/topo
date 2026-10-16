@@ -12,7 +12,9 @@ one HostLink out. The outcome is one of
 and the Case label names the rule that decided it. No numeric score.
 
 College signals, every one restricted to the Recipient's state (#32, #35):
-Recipient UEI -> IPEDS `ueis`; Recipient name -> IPEDS names (every name since
+Recipient UEI -> IPEDS `ueis`; only when no IPEDS unit lists it, Recipient UEI ->
+a FAC auditee with that UEI -> the IPEDS unit of the auditee's exact name
+(`fac_uei`, confirming only with the name); Recipient name -> IPEDS names (every name since
 `directory_from_year`, plus `inst_alias`); the ED list "Recipient/ campus" text
 (by exact FAIN) and award-description phrases -> IPEDS names, former names,
 aliases and generated acronyms; campus words, checked only against sibling
@@ -256,11 +258,16 @@ class HostLookups:
     _by_acronym: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
     _by_base: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
     _years: tuple[int, int] | None = None  # first and last IPEDS directory year
+    _by_fac_uei: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
 
     @classmethod
-    def from_directory(cls, directory: pl.DataFrame, lea_directory: pl.DataFrame | None = None) -> "HostLookups":
-        """Build from the cleaned IPEDS directory history (topo.sources.ipeds) and, for
-        district Hosts, the cleaned CCD LEA directory history (topo.sources.ccd)."""
+    def from_directory(
+        cls, directory: pl.DataFrame, lea_directory: pl.DataFrame | None = None,
+        fac_audits: pl.DataFrame | None = None,
+    ) -> "HostLookups":
+        """Build from the cleaned IPEDS directory history (topo.sources.ipeds), for district
+        Hosts the cleaned CCD LEA directory history (topo.sources.ccd), and for the FAC UEI
+        signal the cleaned FAC audits (topo.sources.fac: auditee UEI, name and state)."""
         latest: dict[str, dict] = {}
         texts: dict[str, set[str]] = defaultdict(set)  # every name and non-acronym alias
         acronyms: dict[str, set[str]] = defaultdict(set)
@@ -316,6 +323,11 @@ class HostLookups:
                 by_phrase[(district.state, phrase)].add(leaid)
             for core in district.cores:
                 by_core[(district.state, core)].add(leaid)
+        by_fac_uei: dict[tuple[str, str], set[str]] = defaultdict(set)
+        if fac_audits is not None:
+            for uei, name, state in fac_audits.select("auditee_uei", "auditee_name", "auditee_state").iter_rows():
+                if uei and state:
+                    by_fac_uei[(state, uei)] |= by_name.get((state, name_key(name)), set())
         return cls(
             units,
             _frozen(by_uei),
@@ -327,10 +339,15 @@ class HostLookups:
             _by_acronym=_frozen(by_acronym),
             _by_base=_frozen(by_base),
             _years=(min(all_years), max(all_years)) if all_years else None,
+            _by_fac_uei={k: frozenset(v) for k, v in by_fac_uei.items() if v},
         )
 
     def units_by_uei(self, state: str, uei: str | None) -> frozenset[str]:
         return self._by_uei.get((state, uei), frozenset()) if uei else frozenset()
+
+    def units_by_fac_uei(self, state: str, uei: str | None) -> frozenset[str]:
+        """Units named (exact name key) by a same-state FAC auditee that carries this UEI."""
+        return self._by_fac_uei.get((state, uei), frozenset()) if uei else frozenset()
 
     def units_by_name(self, state: str, name: str | None) -> frozenset[str]:
         key = name_key(name)
@@ -481,6 +498,9 @@ def _college_signals(grant: GrantFacts, lookups: HostLookups) -> tuple[dict[str,
         return signals, {}
     for uid in lookups.units_by_uei(state, grant.recipient_uei):
         signals[uid].add("uei")
+    if not signals:  # FAC only stands in where no same-state IPEDS unit lists the UEI
+        for uid in lookups.units_by_fac_uei(state, grant.recipient_uei):
+            signals[uid].add("fac_uei")
     for uid in lookups.units_by_name(state, grant.recipient_name):
         signals[uid].add("name")
     for uid in lookups.units_by_phrase(state, (grant.ed_recipient_campus or "").replace("/", " ")):
@@ -561,6 +581,8 @@ def _decide_college(
             return REVIEW, "only_candidate_is_system_office", uid
         if "uei" in sig and len(sig) >= 2:
             return MATCHED, "uei_confirmed", uid
+        if {"fac_uei", "name"} <= sig:
+            return MATCHED, "fac_uei_confirmed", uid
         if sig & SPECIFIC and (sig & {"uei", "name"} or "address" in with_address):
             return MATCHED, "campus_text_confirmed", uid
         if sig == {"uei"}:

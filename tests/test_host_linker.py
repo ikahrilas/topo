@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 from support.ccd import lea_directory, lea_row
+from support.fac import cleaned_audits
 from support.ipeds import directory, directory_row
 
 from topo.domain.host_linking import GrantFacts, HostLookups, link_host
@@ -287,3 +288,44 @@ def test_districts_are_looked_up_only_for_gear_up_partnerships():
     assert (link.outcome, link.case_label, link.host_kind, link.host_id) == (
         "matched", "uei_confirmed", "UNITID", "230038",
     )
+
+
+# ------------------------------------------------- FAC auditee UEIs (spec #28: "IPEDS UEIs plus FAC")
+# A Recipient UEI that no same-state IPEDS unit lists may be a FAC auditee UEI; the auditee's name
+# then names a same-state IPEDS unit. A modest signal: it never overrides an IPEDS UEI and never
+# crosses a state line.
+
+FAC_LOOKUPS = HostLookups.from_directory(
+    directory(
+        directory_row("145600", "Northeastern Illinois University", "IL", ueis=("NEIUIPEDS001",)),
+        directory_row("145619", "Chicago State University", "IL"),
+        directory_row("228778", "The University of Texas at Austin", "TX"),
+    ),
+    fac_audits=cleaned_audits(
+        ("CSUFACUEI001", "Chicago State University", "IL"),
+        ("NEIUIPEDS001", "Chicago State University", "IL"),  # contradicts IPEDS: IPEDS wins
+        ("UTFACUEI0001", "The University of Texas at Austin", "TX"),
+    ),
+)
+
+
+def test_a_fac_auditee_uei_names_a_same_state_unit_and_confirms_the_recipient_name():
+    link = link_host(grant("P042A220101", "CHICAGO STATE UNIVERSITY", "IL", "CSUFACUEI001"), FAC_LOOKUPS)
+    assert (link.outcome, link.case_label, link.host_id) == ("matched", "fac_uei_confirmed", "145619")
+    assert [c.signals for c in link.candidates] == [("fac_uei", "name")]
+
+
+def test_a_fac_auditee_uei_alone_is_a_weak_signal():
+    link = link_host(grant("P042A220102", "BOARD OF TRUSTEES CSU", "IL", "CSUFACUEI001"), FAC_LOOKUPS)
+    assert (link.outcome, link.case_label, link.host_id) == ("review", "single_weak_signal:fac_uei", "145619")
+
+
+def test_a_fac_auditee_uei_never_overrides_an_ipeds_uei():
+    link = link_host(grant("P042A220103", "NORTHEASTERN ILLINOIS UNIVERSITY", "IL", "NEIUIPEDS001"), FAC_LOOKUPS)
+    assert (link.outcome, link.case_label, link.host_id) == ("matched", "uei_confirmed", "145600")
+    assert {c.host_id for c in link.candidates} == {"145600"}
+
+
+def test_a_fac_auditee_in_another_state_is_never_a_signal():
+    link = link_host(grant("P042A220104", "UT AUSTIN TRIO", "OK", "UTFACUEI0001"), FAC_LOOKUPS)
+    assert (link.outcome, link.candidates) == ("unmatched", ())

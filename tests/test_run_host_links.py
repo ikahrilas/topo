@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
+from support.fac import audit, award_line, write_fac
 from support.ipeds import (
     DIRECTORY_COLUMNS,
     ENROLLMENT_COLUMNS,
@@ -146,3 +147,26 @@ def test_ed_list_text_descriptions_addresses_and_start_years_reach_the_linker(pr
     links = pl.read_parquet(project.root / "data" / "joined" / "host_links.parquet")
     flags = links.filter(pl.col("followed_ipeds_merge")).select("fain", "case_label").rows()
     assert flags == [("P042A250013", "uei_confirmed")]
+
+
+def test_fac_auditee_ueis_reach_the_linker(project):
+    # Spec #28: "UEI linking uses IPEDS UEIs plus FAC". IPEDS lists no UEI for Chicago State;
+    # the FAC auditee carrying the Recipient's UEI names it.
+    write_actions(project.raw_usaspending, PULL, [
+        one_year("P042A250021", "CHICAGO STATE UNIVERSITY", "CSUFACUEI001", "IL", IHE),
+    ])
+    folder = project.root / "data" / "raw" / "ipeds" / PULL
+    write_csv(folder / "colleges_ipeds_directory.csv", DIRECTORY_COLUMNS,
+              [directory_row("145619", "Chicago State University", "IL")])
+    write_csv(folder / "colleges_ipeds_fall-enrollment-race_2024.csv", ENROLLMENT_COLUMNS, [])
+    write_fac(project.root, PULL, [award_line("CSUFACUEI001", 2024, "042A", 300000)],
+              [audit("CSUFACUEI001", 2024, "Chicago State University", state="IL")])
+
+    project.topo("run", "--as-of", PULL)
+
+    row = by_fain(project.read_csv(f"target_list_{PULL}.csv"))["P042A250021"]
+    assert (row["Host ID"], row["Host confidence"], row["Case label"]) == (
+        "UNITID 145619", "matched", "fac_uei_confirmed")
+    candidates = pl.read_parquet(project.root / "data" / "joined" / "host_link_candidates.parquet")
+    [(fain, signals)] = candidates.select("fain", "signals").rows()
+    assert fain == "P042A250021" and "fac_uei" in signals.split("+")

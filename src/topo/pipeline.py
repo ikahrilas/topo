@@ -178,7 +178,9 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
-    lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
+    lookups = HostLookups.from_directory(
+        ipeds.read_directory(config), ccd.read_lea_directory(config), fac.read_audits(config)
+    )
     host_links, after_rules = _join_host_links(config, universe, actions, lookups)
     successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
     _join_local_context(config, host_links, pull_date)
