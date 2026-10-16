@@ -27,6 +27,7 @@ from topo.domain.grant_universe import (
 )
 from topo.domain.host_gating import Gate, apply_overrides, check_separate, gate_and_override, gate_host_links
 from topo.domain.host_linking import LEAID, UNITID, HostLookups, build_host_links
+from topo.domain.renewal_backtest import BacktestSettings, run_backtest
 from topo.domain.renewal_timing import (
     RenewalSettings,
     new_award_fys,
@@ -90,6 +91,9 @@ COHORT_TIMING = "cohort_timing"  # (Program, Cohort FY): observed gap, Predicted
 RENEWAL_TIMING = "renewal_timing"  # one row per FAIN: Cohort timing, Re-competing soon, GEAR UP end-date fact
 RENEWAL_TIMING_EXCEPTIONS = "renewal_timing_exceptions"  # Budget-period ends that disagree with the Cohort
 DEADLINES = "deadlines"  # the curated deadline table, recorded as an input for provenance sidecars
+# Renewal-timing backtest (#41).
+RENEWAL_BACKTEST = "renewal_backtest"  # per TRIO Program: backtest As-of, prediction, actual deadline, scores
+RENEWAL_BACKTEST_GRANTS = "renewal_backtest_grants"  # per prior-Cohort Grant: flagged, re-competed
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
     _join_funding_status(config, universe, context, successors)
     _join_renewal_timing(config, universe, actions, context)
+    _join_renewal_backtest(config, actions, context)
     _join_ed_lists(config, universe, actions, pull_date)
     _join_reconciliation(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
@@ -286,6 +291,27 @@ def _join_renewal_timing(
     cohort_timing.write_parquet(config.layout.joined_table(COHORT_TIMING))
     timing.write_parquet(config.layout.joined_table(RENEWAL_TIMING))
     exceptions.write_parquet(config.layout.joined_table(RENEWAL_TIMING_EXCEPTIONS))
+
+
+def _join_renewal_backtest(config: Config, actions: pl.DataFrame, context: RunContext) -> None:
+    """Replay the renewal-timing rule on the backtest competition under per-Program As-of dates (joined layer)."""
+    renewal = RenewalSettings.from_config(config)
+    deadlines = read_deadline_table(config.layout.curated / renewal.deadline_table)
+    scores, grants = run_backtest(
+        actions, deadlines, pl.read_parquet(config.layout.joined_table(COHORT_STARTS)),
+        pl.read_parquet(config.layout.joined_table(SUCCESSIONS)),
+        settings=BacktestSettings.from_config(config), renewal=renewal, windows=ReadWindows.from_config(config),
+        lookback=LookbackSettings.from_config(config),
+    )
+    run_log.record(
+        config, layer="join", source=RENEWAL_BACKTEST, rows_in=scores.height, rows_out=scores.height, drops={},
+        pull_date=context.pull_date,
+        input_hash=provenance.combined_hash(
+            provenance.file_sha256(config.layout.joined_table(name)) for name in (COHORT_STARTS, SUCCESSIONS)
+        ),
+    )
+    scores.write_parquet(config.layout.joined_table(RENEWAL_BACKTEST))
+    grants.write_parquet(config.layout.joined_table(RENEWAL_BACKTEST_GRANTS))
 
 
 def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame, pull_date: dt.date) -> None:
@@ -440,6 +466,10 @@ def report(config: Config) -> Delivered:
             answer_key_rows=curated.read_answer_key(config).height,
             tuning_set_rows=curated.read_tuning_set(config).height,
             input_hashes=_input_hashes(config),
+            cohort_timing=pl.read_parquet(config.layout.joined_table(COHORT_TIMING)),
+            backtest=pl.read_parquet(config.layout.joined_table(RENEWAL_BACKTEST)),
+            backtest_grants=pl.read_parquet(config.layout.joined_table(RENEWAL_BACKTEST_GRANTS)),
+            backtest_bar=BacktestSettings.from_config(config).pass_bar,
         )
     )
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)

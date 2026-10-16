@@ -140,3 +140,17 @@ cycle_months = 60
 # ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
 lead_months = 12
 deadline_table = "deadlines.csv"
+
+[renewal_backtest]
+# The renewal-timing backtest (#12, #41). The rule is replayed on the
+# `competition_fy` TRIO competition under a per-Program As-of date
+# [renewal_timing] lead_months before that Program's actual deadline (from the
+# deadline table), and its Re-competing soon flag must reach `pass_bar` recall
+# and precision. ASSUMPTION: 95%, the same bar as Case-label gating.
+competition_fy = 2022
+pass_bar = 0.95
+# `topo freeze` pre-registers the predictions for this competition in
+# data/curated/<frozen_predictions>: written once, committed and tagged, never
+# edited. `topo score-predictions` writes each later scoring as a new file.
+freeze_competition_fy = 2027
+frozen_predictions = "fy2027_predictions.csv"
