@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from topo.sources import usaspending
+from topo.sources import ipeds, usaspending
 
 SOURCES: dict[str, ModuleType] = {
     usaspending.SOURCE: usaspending,
+    ipeds.SOURCE: ipeds,
 }

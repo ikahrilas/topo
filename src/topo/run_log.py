@@ -2,7 +2,7 @@
 
 Columns: run_id, layer (clean / join / report), source (the source or table the
 layer built), rows_in, rows_out, drops (list of {reason, rows}: every row that
-went in and didn't come out, by named reason), pull_date, input_hash.
+went in and didn't come out, by named reason; zero counts are left out), pull_date, input_hash.
 
 `record` checks the row balance first (rows_in == rows_out + drops); a row lost
 without a named reason is a structural break, and nothing is logged.
@@ -65,7 +65,7 @@ def record(
                 "source": source,
                 "rows_in": rows_in,
                 "rows_out": rows_out,
-                "drops": [{"reason": r, "rows": n} for r, n in sorted(drops.items())],
+                "drops": [{"reason": r, "rows": n} for r, n in sorted(drops.items()) if n],
                 "pull_date": pull_date,
                 "input_hash": input_hash,
             }

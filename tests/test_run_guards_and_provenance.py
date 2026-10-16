@@ -276,6 +276,35 @@ def test_other_problems_only_warn(project):
     assert len(project.read_csv(f"target_list_{PULL}.csv")) == 1
 
 
+def test_ipeds_clean_is_logged_and_its_raw_files_reach_the_sidecar(project):
+    from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
+
+    one_grant(project)
+    folder = project.root / "data/raw/ipeds" / PULL
+    write_csv(folder / "colleges_ipeds_directory.csv", DIRECTORY_COLUMNS, [
+        directory_row("120971", "West Hills College Lemoore", "CA", year=2014),  # before directory_from_year
+        directory_row("120971", "West Hills College Lemoore", "CA", year=2016),
+        directory_row("190035", "CUNY System Office", "NY", sector=0),
+    ])
+    write_csv(folder / "colleges_ipeds_fall-enrollment-race_2024.csv", ENROLLMENT_COLUMNS, [
+        enrollment_row("120971", 2024, 3500),
+        enrollment_row("120971", 2024, 2000, sex=1),  # a breakdown, not the total
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    logged = {(r["layer"], r["source"]): r for r in run_log(project)}
+    directory, enrollment = logged[("clean", "ipeds_directory")], logged[("clean", "ipeds_enrollment")]
+    assert (directory["rows_in"], directory["rows_out"], drops(directory)) == (3, 2, {"year_before_directory_from_year": 1})
+    assert (enrollment["rows_in"], enrollment["rows_out"], drops(enrollment)) == (2, 1, {"not_a_total_enrollment_row": 1})
+    sidecar = json.loads((project.output / f"target_list_{PULL}.csv.provenance.json").read_text())
+    assert {f["source"] for f in sidecar["raw_files"]} == {"ipeds", "usaspending"}
+    assert sorted(f["path"] for f in sidecar["raw_files"] if f["source"] == "ipeds") == [
+        f"data/raw/ipeds/{PULL}/colleges_ipeds_directory.csv",
+        f"data/raw/ipeds/{PULL}/colleges_ipeds_fall-enrollment-race_2024.csv",
+    ]
+
+
 # ----------------------------------------------------------------- API keys
 
 

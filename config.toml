@@ -31,6 +31,16 @@ pull_from_fy = 2015
 # id for list_monthly_files (ED = 80).
 archive_agencies = [{ toptier_code = "091", bulk_agency_id = 80 }]
 
+[ipeds]
+# Urban Education Data Portal bulk CSVs, fetched by `topo pull ipeds`. Never
+# Urban's /api/ (robots.txt disallows it). ODC-By: cite portal and dataset.
+directory_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_directory.csv"
+# UNVERIFIED file name: check it against
+# https://educationdata.urban.org/documentation/data/api-downloads.json before the first pull.
+enrollment_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_fall-enrollment-race_2024.csv"
+# Directory years kept: names since 2015 cover former names; UEIs start in 2022.
+directory_from_year = 2015
+
 [api_keys]
 # Environment variables holding API keys (never the keys themselves). Set them in
 # the shell or in a .env file beside this one; .env is git-ignored. Only the
