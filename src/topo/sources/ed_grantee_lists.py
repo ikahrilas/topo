@@ -80,6 +80,21 @@ class EdTrioListRows(pa.DataFrameModel):
         strict = True
 
 
+class EdListCoverage(pa.DataFrameModel):
+    """Whether a list is filed for one (manifest program, FY); missing rows are the known gaps."""
+
+    manifest_program: str
+    program: str
+    fiscal_year: int = pa.Field(ge=2000)
+    status: str = pa.Field(isin=[FILED, MISSING])
+    note: str
+    raw_file: str = pa.Field(nullable=True)
+    filed_date: dt.date
+
+    class Config:
+        strict = True
+
+
 # ------------------------------------------------------------------ manifest
 
 
@@ -299,16 +314,33 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     manifest = read_manifest(path) if path.exists() else []
 
     trio: list[dict] = []
+    coverage: list[dict] = []
     for row in manifest:
-        if row.status != FILED:
-            continue
-        if program_of(row.program).family == "TRIO":
+        program = program_of(row.program)
+        coverage.extend(
+            {
+                "manifest_program": row.program,
+                "program": program.name,
+                "fiscal_year": fy,
+                "status": row.status,
+                "note": row.note,
+                "raw_file": row.stored_name or None,
+                "filed_date": row.pull_date,
+            }
+            for fy in row.fiscal_years
+        )
+        if row.status == FILED and program.family == "TRIO":
             trio.extend(_trio_rows(layout, row))
 
     trio_rows = _frame(EdTrioListRows, trio).sort("program", "fiscal_year", "fain")
     check_unique(trio_rows, ["program", "fiscal_year", "fain"], "ED TRIO grantee lists")
     trio_rows = check_schema(EdTrioListRows, trio_rows, "ED TRIO grantee lists")
 
+    list_coverage = _frame(EdListCoverage, coverage).sort("program", "fiscal_year")
+    check_unique(list_coverage, ["manifest_program", "fiscal_year"], "ED grantee-list coverage")
+    list_coverage = check_schema(EdListCoverage, list_coverage, "ED grantee-list coverage")
+
     layout.cleaned.mkdir(parents=True, exist_ok=True)
     trio_rows.write_parquet(layout.cleaned_table(TRIO_TABLE))
+    list_coverage.write_parquet(layout.cleaned_table(COVERAGE_TABLE))
     return trio_rows

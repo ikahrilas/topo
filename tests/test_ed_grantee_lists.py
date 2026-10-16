@@ -139,3 +139,30 @@ def test_cleaned_output_passes_its_schema_check(project, tmp_path):
     result = project.topo("clean", "ed_grantee_lists", expect_exit=2)
 
     assert "failed its schema check" in result.output
+
+
+def test_known_list_gaps_are_recorded_not_chased(project, no_network):
+    lists = raw_dir(project)
+    write_manifest(lists, [
+        file_list(lists, "ub_84047A", "2024", "ub.pdf", ub_pdf()),
+        known_gap("ub_84047A", "2023", "known gap: no FY2023 list on the Upward Bound page"),
+    ])
+
+    project.topo("clean", "ed_grantee_lists")
+
+    coverage = cleaned(project, "ed_list_coverage").filter(pl.col("program") == "Upward Bound")
+    assert coverage.sort("fiscal_year").select("fiscal_year", "status", "note").rows() == [
+        (2023, "missing", "known gap: no FY2023 list on the Upward Bound page"),
+        (2024, "ok", ""),
+    ]
+
+
+def test_the_committed_manifest_records_the_11_known_gaps():
+    from conftest import REPO_ROOT
+    from topo.sources.ed_grantee_lists import read_manifest
+
+    manifest = read_manifest(REPO_ROOT / "data" / "raw" / "ed_grantee_lists" / "manifest.csv")
+
+    gaps = sorted((r.program, r.fy) for r in manifest if r.status == "missing")
+    assert len(gaps) == 11
+    assert ("ub_84047A", "2021") in gaps and ("mcnair_84217A", "2022") in gaps
