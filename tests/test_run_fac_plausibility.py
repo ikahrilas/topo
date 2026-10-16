@@ -96,7 +96,7 @@ def test_only_direct_lines_and_ueis_in_both_sources_are_compared(project):
     assert rows["LOWRATIO0002"]["FAC audit years"] == "2"
 
 
-def test_every_row_is_labelled_plausibility_not_reconciliation_and_kept_out_of_the_reconciliation_table(project):
+def test_every_row_is_labelled_plausibility_not_reconciliation(project):
     case(project)
 
     project.topo("run", "--as-of", PULL)
@@ -105,7 +105,30 @@ def test_every_row_is_labelled_plausibility_not_reconciliation_and_kept_out_of_t
     assert rows and {r["Basis"] for r in rows} == {"plausibility, not reconciliation"}
     assert {r["Check"] for r in rows} == {"fac_plausibility"}
     assert all(r["Note"] for r in rows)
-    assert not [r for r in project.read_csv(f"reconciliation_{PULL}.csv") if "fac" in r["Check"].lower()]
+
+
+def test_check_d_summarises_the_review_count_per_program_and_span_in_the_reconciliation_table(project):
+    # Spec #28: the reconciliation table compares the data with "... and the FAC"; checks (a)-(d).
+    case(project)
+
+    project.topo("run", "--as-of", PULL)
+
+    rows = {r["Program"]: r for r in project.read_csv(f"reconciliation_{PULL}.csv")
+            if r["Check"] == "fac_plausibility"}
+    assert set(rows) == {
+        "Student Support Services", "Talent Search",
+        "Upward Bound; Upward Bound Math and Science; Veterans Upward Bound",
+        "Educational Opportunity Centers", "McNair", "GEAR UP partnership; GEAR UP state",
+    }
+    assert {r["FY"] for r in rows.values()} == {"FY2021-FY2025"}
+    assert {(r["Reconciliation status"], r["Gap reason code"]) for r in rows.values()} == {
+        ("not comparable", "plausibility_only")}
+    assert all(r["Note"].startswith("plausibility, not reconciliation") for r in rows.values())
+    assert "1 of 1 (Recipient UEI, listing) pairs flagged review" in rows["Talent Search"]["Note"]
+    assert "0 of 1 (Recipient UEI, listing) pairs flagged review" in rows["Educational Opportunity Centers"]["Note"]
+    assert "no Recipient UEI in both sources" in rows["McNair"]["Note"]
+    ub = rows["Upward Bound; Upward Bound Math and Science; Veterans Upward Bound"]
+    assert (ub["Reference value"], ub["Compared value"], ub["Gap"]) == ("500000.00", "450000.00", "")
 
 
 def test_a_ueis_listing_with_no_direct_fac_line_reads_zero_and_review(project):

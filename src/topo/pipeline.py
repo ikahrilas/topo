@@ -51,6 +51,7 @@ from topo.domain.succession import (
     successor_fains,
 )
 from topo.domain.reconciliation import (
+    NOT_COMPARABLE_CODES,
     RECONCILED,
     ReconciliationInputs,
     Tolerances,
@@ -188,8 +189,8 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     _join_renewal_timing(config, universe, actions, context)
     _join_renewal_backtest(config, actions)
     _join_ed_lists(config, universe, actions, pull_date)
-    _join_reconciliation(config, universe, context)
     _join_fac_plausibility(config, universe, context)
+    _join_reconciliation(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
 
@@ -425,11 +426,13 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         ed_gearup_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.GEARUP_TABLE),
         ed_list_coverage=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
         funding_status=pl.read_parquet(config.layout.joined_table(FUNDING_STATUS)),
+        fac_plausibility=pl.read_parquet(config.layout.joined_table(FAC_PLAUSIBILITY)),
+        fac_span=_fac_span(config, universe),
     )
     result = build_reconciliation(inputs, Tolerances.from_config(config))
     table = result.table
     misses = table.filter(pl.col("reconciliation_status") != RECONCILED).filter(
-        ~pl.col("gap_reason_code").is_in(["not_published", "no_ed_list"])
+        ~pl.col("gap_reason_code").is_in(list(NOT_COMPARABLE_CODES))
     )
     if misses.height:
         named = "; ".join(
@@ -445,6 +448,11 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
             f"{overall['with_ed_list_evidence']} of {overall['unfunded_budget_periods']} unfunded Budget periods "
             "are funded on an ED grantee list: unfunded status partly reflects USAspending reporting gaps"
         )
+
+
+def _fac_span(config: Config, universe: GrantUniverse) -> tuple[int, int]:
+    span = Span.of(universe.window, PlausibilitySettings.from_section(config.section("fac")))
+    return span.start_fy, span.end_fy
 
 
 def _join_fac_plausibility(config: Config, universe: GrantUniverse, context: RunContext) -> None:

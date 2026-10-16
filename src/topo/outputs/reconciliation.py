@@ -36,7 +36,9 @@ def reconciliation_display(table: pl.DataFrame) -> pl.DataFrame:
     return table.select(
         pl.col("check").alias("Check"),
         pl.col("program").alias("Program"),
-        pl.format("FY{}", pl.col("fiscal_year")).alias("FY"),
+        pl.when(pl.col("span_start_fy").is_not_null())
+        .then(pl.format("FY{}-FY{}", pl.col("span_start_fy"), pl.col("fiscal_year")))
+        .otherwise(pl.format("FY{}", pl.col("fiscal_year"))).alias("FY"),
         pl.col("reference_source").alias("Reference source"),
         _amount("reference_value").alias(_MONEY["reference_value"]),
         pl.col("compared_source").alias("Compared source"),

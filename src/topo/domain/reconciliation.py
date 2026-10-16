@@ -17,6 +17,12 @@ Checks:
                                    whichever is larger)
     ed_list_dollars                (c) ED grantee list total vs USAspending, exact. TRIO: every
     ed_list_count                      Grant of the Program; GEAR UP: new awards (A1) only.
+    fac_plausibility               (d) FAC direct amount expended vs USAspending obligations, per
+                                   listing's Programs over the plausibility span (FY column
+                                   "FY2021-FY2025"). Plausibility, not reconciliation: always
+                                   `not comparable` / `plausibility_only`, the note counting the
+                                   (Recipient UEI, listing) pairs flagged review. The detail is
+                                   the FAC plausibility table (topo.domain.fac_plausibility).
 
 FY basis: the action-date FY is primary. The Budget-period variant labels each
 action by the FY its Budget period starts in; a row that passes only on the
@@ -33,8 +39,11 @@ from typing import Any
 import pandera.polars as pa
 import polars as pl
 
+from topo.domain.fac_plausibility import BASIS as FAC_BASIS
+from topo.domain.fac_plausibility import CHECK as FAC_CHECK
+from topo.domain.fac_plausibility import REVIEW as FAC_REVIEW
 from topo.domain.funding_status import UNFUNDED
-from topo.domain.programs import GEAR_UP, PROGRAMS, TRIO
+from topo.domain.programs import GEAR_UP, LISTINGS, PROGRAMS, TRIO
 from topo.fiscal import ReportingWindow, fiscal_year, fy_end, fy_label
 from topo.guards import StructuralBreak, check_schema, check_unique
 
@@ -44,7 +53,11 @@ ED_ALLOCATION_DOLLARS = "ed_allocation_dollars"
 ED_ALLOCATION_COUNT = "ed_allocation_count"
 ED_LIST_DOLLARS = "ed_list_dollars"
 ED_LIST_COUNT = "ed_list_count"
-CHECKS = (APPROPRIATION_VS_ALLOCATIONS, ED_ALLOCATION_DOLLARS, ED_ALLOCATION_COUNT, ED_LIST_DOLLARS, ED_LIST_COUNT)
+FAC_PLAUSIBILITY = FAC_CHECK
+CHECKS = (
+    APPROPRIATION_VS_ALLOCATIONS, ED_ALLOCATION_DOLLARS, ED_ALLOCATION_COUNT, ED_LIST_DOLLARS, ED_LIST_COUNT,
+    FAC_PLAUSIBILITY,
+)
 
 # Reconciliation status
 RECONCILED = "reconciled"
@@ -58,10 +71,12 @@ NO_ED_LIST = "no_ed_list"
 PROVISIONAL = "provisional"
 UNEXPLAINED = "unexplained"
 EXCEEDS_APPROPRIATION_UNEXPLAINED = "exceeds_appropriation_unexplained"
+PLAUSIBILITY_ONLY = "plausibility_only"  # (d): a third source compared without pass/fail
 GAP_REASON_CODES = (
     NOT_PUBLISHED, TIMING_DIFFERENCE, NO_ED_LIST, PROVISIONAL, UNEXPLAINED, EXCEEDS_APPROPRIATION_UNEXPLAINED,
+    PLAUSIBILITY_ONLY,
 )
-NOT_COMPARABLE_CODES = (NOT_PUBLISHED, NO_ED_LIST)
+NOT_COMPARABLE_CODES = (NOT_PUBLISHED, NO_ED_LIST, PLAUSIBILITY_ONLY)
 
 FEDERAL_TRIO_PROGRAMS = "Federal TRIO Programs"
 TRIO_PROGRAMS = tuple(p.name for p in PROGRAMS if p.family == TRIO)
@@ -109,7 +124,8 @@ class Reconciliation(pa.DataFrameModel):
 
     check: str = pa.Field(isin=list(CHECKS))
     program: str
-    fiscal_year: int
+    fiscal_year: int  # the FY, or the last FY of a span
+    span_start_fy: int = pa.Field(nullable=True)  # (d) only: the span's first FY
     reference_source: str
     reference_value: float = pa.Field(nullable=True)
     compared_source: str
@@ -139,6 +155,8 @@ class ReconciliationInputs:
     ed_gearup_list_rows: pl.DataFrame  # cleaned EdGearUpListRows (new awards)
     ed_list_coverage: pl.DataFrame  # cleaned EdListCoverage: filed or missing per (Program, FY)
     funding_status: pl.DataFrame  # joined BudgetPeriodFundingStatus (read, never changed here)
+    fac_plausibility: pl.DataFrame | None = None  # joined FacPlausibility; with fac_span, adds check (d)
+    fac_span: tuple[int, int] | None = None  # (first FY, last FY) of the plausibility span
 
 
 class EdListFainDifferences(pa.DataFrameModel):
@@ -193,7 +211,7 @@ def _money(value: float | None) -> str:
 
 def _row(check: str, program: str, fy: int, reference_source: str, compared_source: str, **values: Any) -> dict:
     row = {
-        "check": check, "program": program, "fiscal_year": fy,
+        "check": check, "program": program, "fiscal_year": fy, "span_start_fy": None,
         "reference_source": reference_source, "reference_value": None,
         "compared_source": compared_source, "compared_value": None,
         "gap": None, "tolerance": None, "budget_period_value": None, "budget_period_gap": None,
@@ -429,6 +447,36 @@ def _ed_lists_vs_usaspending(
     return rows, differences
 
 
+def _fac_plausibility(inputs: ReconciliationInputs) -> list[dict]:
+    """(d) One row per listing's Programs over the span: a summary of the FAC plausibility check."""
+    if inputs.fac_span is None:
+        return []
+    start, end = inputs.fac_span
+    span = f"{fy_label(start)}-{fy_label(end)}"
+    table = inputs.fac_plausibility
+    rows = []
+    for listing in LISTINGS:
+        programs = "; ".join(p.name for p in PROGRAMS if p.listing == listing)
+        pairs = table.filter(pl.col("listing") == listing) if table is not None else None
+        if pairs is None or not pairs.height:
+            lead = f"no Recipient UEI in both sources with obligations and direct FAC lines on {listing} over {span}"
+            values: dict[str, Any] = {}
+        else:
+            review = pairs.filter(pl.col("flag") == FAC_REVIEW).height
+            lead = (f"{review} of {pairs.height} (Recipient UEI, listing) pairs flagged review on {listing} "
+                    f"over {span}; detail in the FAC plausibility table")
+            values = {"reference_value": round(float(pairs["usaspending_obligation"].sum()), 2),
+                      "compared_value": round(float(pairs["fac_amount_expended"].sum()), 2)}
+        row = _row(
+            FAC_PLAUSIBILITY, programs, end, "USAspending obligations (UEIs in both sources)",
+            "FAC direct amount expended", reconciliation_status=NOT_COMPARABLE, gap_reason_code=PLAUSIBILITY_ONLY,
+            note="; ".join([FAC_BASIS, lead, "different measures and calendars, never pass/fail"]), **values,
+        )
+        row["span_start_fy"] = start
+        rows.append(row)
+    return rows
+
+
 def count_unfunded_ed_list_evidence(inputs: ReconciliationInputs, tolerances: Tolerances) -> pl.DataFrame:
     """Count and share of unfunded Budget periods that an ED list shows as funded. Funding status is unchanged."""
     funded_on_list = inputs.ed_trio_list_rows.filter(pl.col("ed_amount") > 0).select(
@@ -467,6 +515,7 @@ def build_reconciliation(inputs: ReconciliationInputs, tolerances: Tolerances) -
     list_rows, differences = _ed_lists_vs_usaspending(inputs, tolerances, by_fain)
     records = (
         _appropriation_vs_allocations(inputs) + _ed_allocations_vs_usaspending(inputs, tolerances, by_fain) + list_rows
+        + _fac_plausibility(inputs)
     )
     columns = Reconciliation.to_schema().columns
     dtypes = {name: col.dtype.type for name, col in columns.items()}
