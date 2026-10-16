@@ -33,7 +33,7 @@ before the Pull date and does not reconcile is `provisional`, not failed.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pandera.polars as pa
@@ -157,6 +157,8 @@ class ReconciliationInputs:
     funding_status: pl.DataFrame  # joined BudgetPeriodFundingStatus (read, never changed here)
     fac_plausibility: pl.DataFrame | None = None  # joined FacPlausibility; with fac_span, adds check (d)
     fac_span: tuple[int, int] | None = None  # (first FY, last FY) of the plausibility span
+    # (Program, FY) -> note for awarded Cohorts with no FAIN reported yet ([target_list] awaited_cohorts)
+    awaited: dict[tuple[str, int], str] = field(default_factory=dict)
 
 
 class EdListFainDifferences(pa.DataFrameModel):
@@ -517,6 +519,10 @@ def build_reconciliation(inputs: ReconciliationInputs, tolerances: Tolerances) -
         _appropriation_vs_allocations(inputs) + _ed_allocations_vs_usaspending(inputs, tolerances, by_fain) + list_rows
         + _fac_plausibility(inputs)
     )
+    for record in records:
+        awaited = inputs.awaited.get((record["program"], record["fiscal_year"]))
+        if awaited and record["span_start_fy"] is None:
+            record["note"] = f"{record['note']}; {awaited}"
     columns = Reconciliation.to_schema().columns
     dtypes = {name: col.dtype.type for name, col in columns.items()}
     table = pl.DataFrame(records, schema=dtypes).select(list(columns)).sort("check", "program", "fiscal_year")

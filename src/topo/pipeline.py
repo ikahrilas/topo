@@ -70,6 +70,7 @@ from topo.domain.cause_notes import read_cause_notes
 from topo.outputs.target_list import (
     ReadmeFacts,
     TargetListSettings,
+    awaited_cohort_notes,
     awaited_notes,
     build_target_list,
     provisional_fiscal_years,
@@ -428,6 +429,7 @@ def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunCo
         funding_status=pl.read_parquet(config.layout.joined_table(FUNDING_STATUS)),
         fac_plausibility=pl.read_parquet(config.layout.joined_table(FAC_PLAUSIBILITY)),
         fac_span=_fac_span(config, universe),
+        awaited=awaited_cohort_notes(universe, TargetListSettings.from_section(config.section("target_list"))),
     )
     result = build_reconciliation(inputs, Tolerances.from_config(config))
     table = result.table

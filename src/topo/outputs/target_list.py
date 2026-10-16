@@ -153,14 +153,19 @@ def provisional_note(fy: int, pull_date: dt.date) -> str:
     return f"{fy_label(fy)} provisional (as of {pull_date.isoformat()}; reporting lag)"
 
 
-def awaited_notes(universe: GrantUniverse, settings: TargetListSettings) -> dict[str, str]:
-    """Program -> note, for awaited Cohorts none of whose FAINs has appeared yet."""
+def awaited_cohort_notes(universe: GrantUniverse, settings: TargetListSettings) -> dict[tuple[str, int], str]:
+    """(Program, FY) -> note, for awaited Cohorts none of whose FAINs has appeared yet."""
     fains = universe.grants["fain"].to_list()
     return {
-        c.program: c.note
+        (c.program, c.fy): c.note
         for c in settings.awaited_cohorts
         if not any(f.startswith(c.fain_prefix()) for f in fains)
     }
+
+
+def awaited_notes(universe: GrantUniverse, settings: TargetListSettings) -> dict[str, str]:
+    """Program -> note, for awaited Cohorts none of whose FAINs has appeared yet."""
+    return {program: note for (program, _), note in awaited_cohort_notes(universe, settings).items()}
 
 TIMING_COLUMNS = {  # joined renewal_timing column -> display column (#40)
     "re_competing_soon_shown": "Re-competing soon",

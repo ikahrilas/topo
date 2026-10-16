@@ -247,3 +247,28 @@ def test_the_committed_curated_files_have_their_schema_headers():
     curated = REPO_ROOT / "data" / "curated"
     assert (curated / "appropriations.csv").read_text().splitlines() == [",".join(APPROPRIATION_COLUMNS)]
     assert (curated / "ed_program_allocations.csv").read_text().splitlines() == [",".join(ALLOCATION_COLUMNS)]
+
+
+def test_talent_search_and_eoc_fy2026_rows_note_that_new_awards_are_not_yet_reported(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 4))
+
+    project.topo("run", "--as-of", PULL)
+
+    table = project.read_csv(RECONCILIATION)
+    noted = {(r["Check"], r["Program"], r["FY"]) for r in table if "FY2026 new awards not yet reported" in r["Note"]}
+    assert noted == {
+        (check, program, "FY2026")
+        for check in ("ed_allocation_dollars", "ed_allocation_count", "ed_list_dollars", "ed_list_count")
+        for program in ("Talent Search", "Educational Opportunity Centers")
+    }
+
+
+def test_the_awaited_note_leaves_once_a_new_fy2026_award_is_reported(project):
+    write_actions(project.raw_usaspending, PULL, [
+        *grant("P047A220845", 2022, 4), *grant("P044A260001", 2026, 1),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    noted = {r["Program"] for r in project.read_csv(RECONCILIATION) if "not yet reported" in r["Note"]}
+    assert noted == {"Educational Opportunity Centers"}
