@@ -49,6 +49,7 @@ from topo.outputs.target_list import (
 )
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
+from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
 from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
@@ -291,6 +292,7 @@ class Delivered:
     target_list_xlsx: Path
     review_queue_csv: Path
     match_quality: Path
+    spot_check: Path
 
 
 def report(config: Config) -> Delivered:
@@ -321,7 +323,10 @@ def report(config: Config) -> Delivered:
         awaited=awaited_notes(universe, settings),
     )
     files = write_target_list(rows, readme, config.layout.output)
-    for path in (files.xlsx, files.csv):
+    spot_check = write_spot_check(
+        rows, readme, SpotCheckSettings.from_section(config.section("spot_check")), config.layout.output
+    )
+    for path in (files.xlsx, files.csv, spot_check):
         provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     candidates = pl.read_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     lookback_grants = pl.read_parquet(config.layout.joined_table(LOOKBACK_GRANTS))
@@ -350,6 +355,7 @@ def report(config: Config) -> Delivered:
     provenance.write_sidecar(config, quality_path, as_of=context.as_of, pull_date=context.pull_date)
     return Delivered(
         target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
+        spot_check=spot_check,
     )
 
 

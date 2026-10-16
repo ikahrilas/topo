@@ -115,3 +115,10 @@ directory_from_year = 2015
 # supervisory union, 4 regional education service agency, 5 state agency,
 # 7 independent charter agency (the host-linking prototype's set).
 agency_types = [1, 2, 4, 5, 7]
+
+[spot_check]
+# Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
+# (data/curated/review_findings.csv). ASSUMPTION: the founder checks 2–3 states.
+min_states = 2
+max_states = 3
+note_max_chars = 100
