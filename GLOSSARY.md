@@ -74,6 +74,16 @@ _Avoid_: At-risk, expiring
 A Grant whose funding was missing, late, or reversed for a Budget period starting in the 2025–26 policy window, whether or not it was later restored; a pattern, not proof of a policy cut.
 _Avoid_: Cut, at-risk (those imply a cause or a forecast)
 
+## Reconciliation
+
+**Reconciliation status**:
+The outcome of one reconciliation row (a check for one Program and fiscal year): reconciled, a stated difference, or not comparable. It is set by a tolerance fixed before the first run and never adjusted to close a gap.
+_Avoid_: Validated, matched (those name Host linking and FAIN joins)
+
+**Gap reason code**:
+The closed-vocabulary label on a reconciliation row that does not reconcile, such as `not_published`, `timing_difference`, `no_ed_list`, `provisional`, or `unexplained`; each carries a cited note.
+_Avoid_: Error, discrepancy
+
 ## Language notes
 
 "Grantee" is fine in conversation and plain-language writing, where it loosely means the Recipient. In data, matching, and specs, use Recipient, Grant, or Host institution.
