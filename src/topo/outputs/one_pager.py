@@ -18,7 +18,10 @@ import polars as pl
 
 from topo.domain.funding_status import DISRUPTION_RESTORED, FUNDED_LATE, REVERSED, UNFUNDED, add_months
 from topo.domain.programs import PROGRAMS
+from topo.domain.fac_plausibility import BASIS as FAC_BASIS
+from topo.domain.fac_plausibility import REVIEW as FAC_REVIEW
 from topo.domain.reconciliation import EXCEEDS_APPROPRIATION_UNEXPLAINED, UNEXPLAINED
+from topo.domain.renewal_backtest import MISS, PASS
 from topo.fiscal import ReportingWindow, fy_label
 from topo.outputs.delivery import delivery_paths, write_new
 from topo.outputs.pdf import render_pdf
@@ -37,29 +40,6 @@ UNTESTED = "untested"
 CHECKED = "checked"
 BLIND_SPOT = "blind spot"
 FAC = "fac"
-
-
-@dataclass(frozen=True)
-class BacktestScores:
-    """The renewal-timing backtest's scores (#41), when it has been run."""
-
-    as_of_fy: int  # the backtested competition FY, e.g. 2022
-    timing_error_months: float  # mean absolute error of the Predicted due date
-    recall: float
-    precision: float
-    bar: float  # the config bar both rates are held to (0.95)
-
-    @property
-    def meets_bar(self) -> bool:
-        return self.recall >= self.bar and self.precision >= self.bar
-
-
-@dataclass(frozen=True)
-class FacPlausibility:
-    """The FAC plausibility check (#43), when it has been run: Recipients compared and flagged `review`."""
-
-    compared: int
-    review: int
 
 
 @dataclass(frozen=True)
@@ -99,8 +79,9 @@ class OnePagerInputs:
     new_award_months: int = 3  # [target_list] new_award_months
     lead_months: int = 12  # [renewal_timing] lead_months
     reconciliation: pl.DataFrame | None = None  # joined reconciliation table
-    backtest: BacktestScores | None = None  # None until the backtest (#41) feeds it
-    fac: FacPlausibility | None = None  # None until the FAC plausibility check (#43) feeds it
+    backtest: pl.DataFrame | None = None  # joined renewal_backtest (#41): one row per TRIO Program
+    backtest_bar: float = 0.95  # [renewal_backtest] pass_bar
+    fac: pl.DataFrame | None = None  # joined fac_plausibility (#43): one row per (Recipient UEI, listing)
 
 
 @dataclass(frozen=True)
@@ -135,16 +116,22 @@ def money(value: float) -> str:
     return f"{sign}${value / 1e3:,.0f}K"
 
 
-def _untested_item(backtest: BacktestScores | None) -> str:
+def _untested_item(backtest: pl.DataFrame | None, bar: float) -> str:
+    """The predictions caveat, with the backtest's per-Program results when it has scored any."""
     rule = "each is the prior Cohort's published deadline plus 60 months (or a deadline already published)"
-    if backtest is None:
+    scored = pl.DataFrame() if backtest is None else backtest.filter(pl.col("result").is_in([PASS, MISS]))
+    if not scored.height:
         return f"Predicted due dates are predictions not yet tested: {rule}, and the rule's backtest has not been scored."
-    verdict = "meeting" if backtest.meets_bar else "below"
+    fy = fy_label(scored["competition_fy"].max())
+    results = ", ".join(
+        f"{r['program']} {r['result']}" for r in scored.sort("program").iter_rows(named=True)
+    )
+    passed = scored.filter(pl.col("result") == PASS).height
+    errors = scored["timing_error_months"].drop_nulls().abs()
+    error = f", mean timing error {errors.mean():.1f} months" if errors.len() else ""
     return (
-        f"Predicted due dates are predictions not yet tested on the coming competitions: {rule}; on the "
-        f"FY{backtest.as_of_fy} backtest the rule scored recall {backtest.recall:.0%} and precision "
-        f"{backtest.precision:.0%}, {verdict} the {backtest.bar:.0%} bar, with a mean timing error of "
-        f"{backtest.timing_error_months:.1f} months."
+        f"Predicted due dates are predictions not yet tested on the coming competitions: {rule}; on the {fy} "
+        f"backtest {passed} of {scored.height} Programs met the {bar:.0%} recall and precision bar ({results}{error})."
     )
 
 
@@ -182,18 +169,20 @@ def _trust_items(inputs: OnePagerInputs) -> TrustItems:
         "Funding status is a pattern read from funding actions, never a cause: gaps are routine in normal years and "
         "court records name only about 11 Grants, so the counts are not proof of a policy cut."
     )))
-    items.append((UNTESTED, _untested_item(inputs.backtest)))
+    items.append((UNTESTED, _untested_item(inputs.backtest, inputs.backtest_bar)))
     items.append((CHECKED, _unexplained_item(inputs)))
     items.append((BLIND_SPOT, (
         "Blind spot: applications that were never funded have no FAIN, so they are not Grants and appear nowhere "
         "here; this covers funded Grants only."
     )))
-    if inputs.fac is not None:
+    if inputs.fac is not None and inputs.fac.height:
         fac = inputs.fac
+        review = fac.filter(pl.col("flag") == FAC_REVIEW).height
+        span = f"{fy_label(fac['span_start_fy'].min())} to {fy_label(fac['span_end_fy'].max())}"
         items.append((FAC, (
-            f"Federal Audit Clearinghouse (FAC) totals were compared as plausibility, not reconciliation: "
-            f"{fac.review} of {fac.compared} Recipients in both sources have five-year ratios outside 0.5 to 1.5 "
-            "and are marked review, with no pass or fail."
+            f"Federal Audit Clearinghouse (FAC) spending was compared {span} as {FAC_BASIS}: {review} of "
+            f"{fac.height} Recipient-and-listing pairs found in both sources are marked review, with no pass or fail "
+            f"(fac_plausibility_{inputs.pull_date.isoformat()}.csv)."
         )))
     return TrustItems(items)
 

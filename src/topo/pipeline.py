@@ -600,6 +600,9 @@ def _report_one_pager(
         new_award_months=settings.new_award_months,
         lead_months=RenewalSettings.from_config(config).lead_months,
         reconciliation=pl.read_parquet(config.layout.joined_table(RECONCILIATION)),
+        backtest=pl.read_parquet(config.layout.joined_table(RENEWAL_BACKTEST)),
+        backtest_bar=BacktestSettings.from_config(config).pass_bar,
+        fac=pl.read_parquet(config.layout.joined_table(FAC_PLAUSIBILITY)),
     ))
     files = write_one_pager(text, config.layout.output, context.pull_date)
     for path in (files.markdown, files.pdf):

@@ -6,19 +6,15 @@ window is FY2021-FY2026 and FY2026 (ended 2026-09-30) is still provisional.
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import re
 
 import pdfplumber
-import polars as pl
-from support.markdown import prose, sections, table
 from support.curated_totals import allocation, write_curated
 from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
+from support.fac import award_line, write_fac
+from support.markdown import prose, sections, table
 from support.usaspending import action, write_actions
-
-from topo.fiscal import ReportingWindow
-from topo.outputs.one_pager import BacktestScores, FacPlausibility, OnePagerInputs, render_one_pager
 
 PULL = "2026-10-07"
 MD = f"one_pager_{PULL}.md"
@@ -241,37 +237,59 @@ def test_a_rerun_writes_new_one_pager_files_and_never_overwrites(project):
         assert (project.output / f"{name}.provenance.json").exists()
 
 
-def bare_inputs(**extra) -> OnePagerInputs:
-    """Renderer inputs with no Grants: only what a later ticket's hook adds shows up."""
-    return OnePagerInputs(
-        pull_date=dt.date(2026, 10, 7), as_of=dt.date(2026, 10, 7), window=ReportingWindow(2021, 2026),
-        grants=pl.DataFrame(schema={"fain": pl.String, "program": pl.String}),
-        fy_obligations=pl.DataFrame(schema={"fain": pl.String, "fiscal_year": pl.Int64, "obligation": pl.Float64}),
-        **extra,
-    )
+BACKTEST_DEADLINES = (
+    "Upward Bound,2017,2017-01-31,Applications for New Awards; Upward Bound (FY2017 NIA),,\n"
+    "Upward Bound,2022,2022-01-31,Applications for New Awards; Upward Bound (86 FR 71477),,\n"
+)
 
 
-def test_without_backtest_scores_or_a_fac_check_the_one_pager_says_neither_has_run():
-    items = trust_items(render_one_pager(bare_inputs()))
+def test_the_predictions_item_carries_the_backtest_result_once_it_is_scored(project):
+    curated = project.root / "data" / "curated"
+    curated.mkdir(parents=True)
+    (curated / "deadlines.csv").write_text(
+        "program,competition_fy,application_deadline,citation,source_url,note\n" + BACKTEST_DEADLINES)
+    write_actions(project.raw_usaspending, PULL, [
+        *grant("P047A170001", 2017, 5), *grant("P047A170002", 2017, 5),
+        *grant("P047A220001", 2022, 5), *grant("P047A220002", 2022, 5),
+    ])
 
+    project.topo("run", "--as-of", PULL)
+
+    [untested] = [item for item in trust_items(one_pager(project)) if "not yet tested" in item]
+    assert "FY2022 backtest 1 of 1 Programs met the 95% recall and precision bar (Upward Bound pass" in untested
+
+
+def test_without_a_scored_backtest_or_fac_data_the_one_pager_says_the_backtest_has_not_been_scored(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 5))
+
+    project.topo("run", "--as-of", PULL)
+
+    items = trust_items(one_pager(project))
     [untested] = [item for item in items if "not yet tested" in item]
     assert "backtest has not been scored" in untested
     assert not [item for item in items if "FAC" in item]
 
 
-def test_backtest_scores_and_fac_plausibility_are_picked_up_when_later_tickets_supply_them():
-    text = render_one_pager(bare_inputs(
-        backtest=BacktestScores(as_of_fy=2022, timing_error_months=0.4, recall=0.97, precision=0.92, bar=0.95),
-        fac=FacPlausibility(compared=120, review=7),
-    ))
+def test_fac_review_pairs_are_counted_as_plausibility_not_reconciliation(project):
+    five_years = {fy: 100_000 for fy in range(2021, 2026)}
+    write_actions(project.raw_usaspending, PULL, [
+        *[action("P047A210001", i + 1, f"{fy}-05-15", amount, (f"{fy}-09-01", f"{fy + 1}-08-31"),
+                 action_type="A1" if i == 0 else "B1", uei="PLAUSIBLE001")
+          for i, (fy, amount) in enumerate(five_years.items())],
+        *[action("P042A210002", i + 1, f"{fy}-05-15", amount, (f"{fy}-09-01", f"{fy + 1}-08-31"),
+                 action_type="A1" if i == 0 else "B1", uei="LOWRATIO0002")
+          for i, (fy, amount) in enumerate(five_years.items())],
+    ])
+    write_fac(project.root, PULL, [
+        *[award_line("PLAUSIBLE001", year, "047", 90_000, reference="AWARD-047") for year in range(2021, 2026)],
+        award_line("LOWRATIO0002", 2022, "042A", 100_000, reference="AWARD-042A"),  # 0.2 of USAspending: review
+    ])
 
-    items = trust_items(text)
-    assert len(items) <= 8
-    [untested] = [item for item in items if "not yet tested" in item]
-    assert "FY2022 backtest" in untested and "recall 97%" in untested and "precision 92%" in untested
-    assert "below the 95% bar" in untested
-    [fac] = [item for item in items if "FAC" in item]
-    assert "7 of 120" in fac and "plausibility, not reconciliation" in fac
+    project.topo("run", "--as-of", PULL)
+
+    [fac] = [item for item in trust_items(one_pager(project)) if "FAC" in item]
+    assert "plausibility, not reconciliation" in fac
+    assert "1 of 2 Recipient-and-listing pairs" in fac
 
 
 def test_with_no_unexplained_rows_the_trust_item_says_none_are(project):
