@@ -11,7 +11,7 @@ The fixture population, by the rule that decides each Grant:
 
 from __future__ import annotations
 
-from support.curated import key_row, write_answer_key
+from support.curated import key_row, override_row, write_answer_key, write_overrides, write_tuning_set
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
 from support.markdown import table
 from support.usaspending import action, write_actions
@@ -95,3 +95,90 @@ def test_an_empty_answer_key_file_reports_every_case_label_unverified(project):
     assert {r["Gating"] for r in accuracy(project).values()} == {"unverified"}
     targets = by(project.read_csv(f"target_list_{PULL}.csv"), "FAIN")
     assert targets["P042A250001"]["Host confidence"] == "matched"  # unverified labels keep the rule's outcome
+
+
+def gating_key():
+    """uei_confirmed: 10 checks, one wrong (90%). nonprofit_no_site_named: 10 checks, all right. gearup_state: 1."""
+    return [
+        *(key_row(fain, f"UNITID {unitid(i)}") for i, fain in enumerate(COLLEGE_FAINS[:9], start=1)),
+        key_row(COLLEGE_FAINS[9], "UNITID 999999", note="the real Host is a branch campus"),
+        *(key_row(fain, "no single Host") for fain in NONPROFIT_FAINS),
+        key_row("P334S250021", "no single Host"),
+    ]
+
+
+def test_fixture_key_auto_accepts_demotes_and_leaves_unverified(project):
+    setup(project)
+    write_answer_key(project.root, gating_key())
+
+    project.topo("run", "--as-of", PULL)
+
+    labels = accuracy(project)
+    got = {k: (r["Checks"], r["Correct"], r["Accuracy"], r["Gating"]) for k, r in labels.items()}
+    assert got["uei_confirmed"] == ("10", "9", "90.0%", "demoted to review")
+    assert got["nonprofit_no_site_named"] == ("10", "10", "100.0%", "auto-accepted")
+    assert got["gearup_state"] == ("1", "1", "100.0%", "unverified")
+    assert got["system_campus_not_stated"][3] == "unverified"
+
+    targets = by(project.read_csv(f"target_list_{PULL}.csv"), "FAIN")
+    college = targets["P042A250001"]
+    assert (college["Host confidence"], college["Case label"], college["Host ID"]) == (
+        "in review", "uei_confirmed", f"UNITID {unitid(1)}",
+    )
+    assert targets["P044A250011"]["Host confidence"] == "lower-confidence: no single Host"
+    assert targets["P334S250021"]["Host confidence"] == "lower-confidence: no single Host"
+
+
+def test_gating_thresholds_come_from_config(project):
+    setup(project)
+    write_answer_key(project.root, gating_key())
+    project.set_config("auto_accept_accuracy = 0.95", "auto_accept_accuracy = 0.90")
+    project.set_config("auto_accept_min_checks = 10", "auto_accept_min_checks = 1")
+
+    project.topo("run", "--as-of", PULL)
+
+    labels = accuracy(project)
+    assert labels["uei_confirmed"]["Gating"] == "auto-accepted"
+    assert labels["gearup_state"]["Gating"] == "auto-accepted"
+    assert by(project.read_csv(f"target_list_{PULL}.csv"), "FAIN")["P042A250001"]["Host confidence"] == "matched"
+
+
+def test_the_tuning_set_is_never_scored_for_gating(project):
+    setup(project)
+    write_answer_key(project.root, [key_row(fain, "no single Host") for fain in NONPROFIT_FAINS])
+    # Every college in the tuning set says the rule is wrong; gating must not see it.
+    write_tuning_set(project.root, [key_row(fain, "UNITID 999999") for fain in COLLEGE_FAINS])
+
+    project.topo("run", "--as-of", PULL)
+
+    labels = accuracy(project)
+    assert (labels["uei_confirmed"]["Checks"], labels["uei_confirmed"]["Gating"]) == ("0", "unverified")
+    assert labels["nonprofit_no_site_named"]["Gating"] == "auto-accepted"
+
+
+def test_a_fain_in_both_the_answer_key_and_the_tuning_set_stops_the_run(project):
+    setup(project)
+    write_answer_key(project.root, [key_row("P044A250011", "no single Host")])
+    write_tuning_set(project.root, [key_row("P044A250011", "no single Host")])
+
+    result = project.topo("run", "--as-of", PULL, expect_exit=2)
+
+    assert "both the frozen answer key and the tuning set" in result.output
+    assert "P044A250011" in result.output
+
+
+def test_a_pinned_answer_key_that_changed_stops_the_run(project):
+    setup(project)
+    write_answer_key(project.root, gating_key())
+    project.set_config('answer_key_sha256 = ""', f'answer_key_sha256 = "{"0" * 64}"')
+
+    result = project.topo("run", "--as-of", PULL, expect_exit=2)
+
+    assert "frozen answer key" in result.output
+
+
+def test_a_malformed_answer_key_host_is_a_structural_break(project):
+    setup(project)
+    write_answer_key(project.root, [key_row("P044A250011", "Rocky Mountain College")])
+
+    project.topo("run", "--as-of", PULL, expect_exit=2)
