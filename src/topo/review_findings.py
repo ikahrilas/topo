@@ -184,3 +184,18 @@ def last_founder_marks(findings: pl.DataFrame) -> pl.DataFrame:
         .group_by("fain", maintain_order=True)
         .agg(shown.last().alias(LAST_FOUNDER_MARK))
     )
+
+
+def spot_check_summary(findings: pl.DataFrame) -> pl.DataFrame:
+    """One row per review date: States, Rows reviewed (marked FAINs), counts of ok, wrong, stale and Missing."""
+    return (
+        findings.group_by("date")
+        .agg(
+            pl.col("state").drop_nulls().unique().sort().str.join(", ").alias("States"),
+            (pl.col("mark") != MISSING).sum().alias("Rows reviewed"),
+            *((pl.col("mark") == m).sum().alias(m) for m in MARKS),
+            (pl.col("mark") == MISSING).sum().alias("Missing"),
+        )
+        .sort("date")
+        .rename({"date": "Review date"})
+    )

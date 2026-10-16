@@ -49,7 +49,7 @@ from topo.outputs.target_list import (
 )
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
-from topo.review_findings import last_founder_marks, read_review_findings
+from topo.review_findings import last_founder_marks, read_review_findings, spot_check_summary
 from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
 from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
@@ -352,6 +352,7 @@ def report(config: Config) -> Delivered:
             answer_key_rows=curated.read_answer_key(config).height,
             tuning_set_rows=curated.read_tuning_set(config).height,
             input_hashes=_input_hashes(config),
+            founder_spot_check=spot_check_summary(findings),
         )
     )
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)

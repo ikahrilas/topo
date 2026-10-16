@@ -15,7 +15,7 @@ from openpyxl import load_workbook
 
 from support.curated import override_row, write_overrides
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
-from support.markdown import table
+from support.markdown import prose, sections, table
 from support.usaspending import action, write_actions
 from support.workbook import read_sheet, sheet_names, sheet_text
 
@@ -241,6 +241,44 @@ def test_later_target_lists_show_the_last_founder_mark_by_fain_read_only(project
     cells = [copy.cell(row=r, column=column) for r in range(2, copy.max_row + 1)]
     assert "wrong (Host institution) on 2026-10-20: Runs at the Twin Cities campus" in {c.value for c in cells}
     assert all(c.protection.locked for c in cells)
+
+
+def test_match_quality_has_a_founder_spot_check_block_kept_apart_from_the_answer_key(project):
+    setup(project)
+    project.topo("run", "--as-of", PULL)
+    project.topo("ingest-findings", str(returned(
+        project,
+        {
+            "P042A250001": ("ok", None, None),
+            "P042A250002": ("ok", None, None),
+            "P047A250003": ("stale", "Project end", "Extended a year"),
+            "P042A250004": ("wrong", "Host institution", "Runs at the Twin Cities campus"),
+        },
+        missing=[("MT", "Big Sky Tribal College", "Upward Bound", "Funded since 2022")],
+    )), "--date", "2026-10-20")
+
+    project.topo("report")
+
+    text = (project.output / f"match_quality_{PULL}_v2.md").read_text()
+    assert table(text, "Founder spot-check") == [{
+        "Review date": "2026-10-20", "States": "MN, MT", "Rows reviewed": "4", "ok": "2", "wrong": "1",
+        "stale": "1", "Missing": "1",
+    }]
+    assert "never scored" in prose(text, "Founder spot-check")
+    accuracy = table(text, "Accuracy per Case label")
+    assert {r["Checks"] for r in accuracy} == {"0"} and {r["Gating"] for r in accuracy} == {"unverified"}
+    assert not (project.root / "data" / "curated" / "host_answer_key.csv").exists()
+    assert list(sections(text)).index("Founder spot-check") < list(sections(text)).index("Inputs")
+
+
+def test_with_no_findings_the_founder_block_says_so(project):
+    setup(project)
+
+    project.topo("run", "--as-of", PULL)
+
+    text = (project.output / f"match_quality_{PULL}.md").read_text()
+    assert table(text, "Founder spot-check") == []
+    assert "No Review findings yet" in prose(text, "Founder spot-check")
 
 
 def test_findings_never_change_the_overrides_file(project):
