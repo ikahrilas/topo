@@ -12,6 +12,8 @@ The fixture population, by the rule that decides each Grant:
 from __future__ import annotations
 
 import hashlib
+import shutil
+from pathlib import Path
 
 from support.curated import key_row, override_row, write_answer_key, write_overrides, write_tuning_set
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
@@ -20,6 +22,7 @@ from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
 REPORT = f"match_quality_{PULL}.md"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 IHE = "PUBLIC/STATE CONTROLLED INSTITUTION OF HIGHER EDUCATION"
 NONPROFIT = "NONPROFIT WITH 501C3 IRS STATUS (OTHER THAN AN INSTITUTION OF HIGHER EDUCATION)"
 
@@ -97,6 +100,15 @@ def test_an_empty_answer_key_file_reports_every_case_label_unverified(project):
     assert {r["Gating"] for r in accuracy(project).values()} == {"unverified"}
     targets = by(project.read_csv(f"target_list_{PULL}.csv"), "FAIN")
     assert targets["P042A250001"]["Host confidence"] == "matched"  # unverified labels keep the rule's outcome
+
+
+def test_the_shipped_curated_files_pass_their_schema_checks(project):
+    setup(project)
+    shutil.copytree(REPO_ROOT / "data" / "curated", project.root / "data" / "curated")
+
+    project.topo("run", "--as-of", PULL)
+
+    assert {r["Gating"] for r in accuracy(project).values()} == {"unverified"}
 
 
 def gating_key():
