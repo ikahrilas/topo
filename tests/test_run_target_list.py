@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 from support.usaspending import action, write_actions
+from support.workbook import read_sheet
 
 PULL = "2026-10-07"
 
@@ -16,6 +17,12 @@ USF_UB = [  # Upward Bound, awarded FY2022; the 2025-09-17 action (FY2025) funds
 ]
 
 
+def all_rows(project, name=f"target_list_{PULL}.xlsx") -> list[dict[str, str]]:
+    """Rows of the workbook's main and Ended sheets (the CSV holds the main sheet only)."""
+    path = project.output / name
+    return read_sheet(path, "Target list") + read_sheet(path, "Ended")
+
+
 def test_run_writes_one_target_list_row_per_fain(project):
     write_actions(project.raw_usaspending, PULL, USF_UB + [
         action("P042A200010", 1, "2020-07-01", 272364, ("2020-09-01", "2021-08-31"), action_type="A1",
@@ -26,7 +33,7 @@ def test_run_writes_one_target_list_row_per_fain(project):
 
     project.topo("run", "--as-of", "2026-10-07")
 
-    rows = project.read_csv(f"target_list_{PULL}.csv")
+    rows = all_rows(project)
     assert sorted(r["FAIN"] for r in rows) == ["P042A200010", "P047A220845"]
     usf = next(r for r in rows if r["FAIN"] == "P047A220845")
     assert usf["Recipient"] == "UNIVERSITY OF SOUTH FLORIDA"
@@ -89,7 +96,7 @@ def test_a_grant_overlapping_the_window_is_kept_even_if_awarded_before_it(projec
 
     project.topo("run", "--as-of", PULL)
 
-    rows = project.read_csv(f"target_list_{PULL}.csv")
+    rows = all_rows(project)
     assert [r["FAIN"] for r in rows] == ["P042A200010"]
     assert rows[0]["Project start"] == "2020-09-01"
     # FY2020 is lookback: it gets no amount column and is not in the cumulative total.

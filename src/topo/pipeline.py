@@ -9,31 +9,75 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import polars as pl
 
-from topo import provenance, run_log
+from topo import curated, curated_totals, provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
 from topo.domain.ed_lists import NOT_IN_USASPENDING, join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
-from topo.domain.grant_universe import EXCEPTION_UNKNOWN_FAIN_PREFIX, GrantUniverse, build_grant_universe
-from topo.domain.host_linking import HostLookups, build_host_links
+from topo.domain.grant_universe import (
+    EXCEPTION_UNKNOWN_FAIN_PREFIX,
+    GrantUniverse,
+    build_grant_universe,
+    build_lookback,
+)
+from topo.domain.host_gating import Gate, apply_overrides, check_separate, gate_and_override, gate_host_links
+from topo.domain.host_linking import LEAID, UNITID, HostLookups, build_host_links
+from topo.domain.succession import (
+    LookbackSettings,
+    build_successions,
+    derive_cohorts,
+    detect_hand_offs,
+    successor_fains,
+)
+from topo.domain.reconciliation import (
+    RECONCILED,
+    ReconciliationInputs,
+    Tolerances,
+    build_reconciliation,
+)
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
-from topo.outputs.target_list import build_target_list, write_target_list_csv
-from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
+from topo.domain.cause_notes import FILE_NAME as CAUSE_NOTES_FILE
+from topo.domain.cause_notes import read_cause_notes
+from topo.outputs.target_list import (
+    ReadmeFacts,
+    TargetListSettings,
+    awaited_notes,
+    build_target_list,
+    provisional_fiscal_years,
+    write_target_list,
+)
+from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
+from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
+from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
+from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
 DROP_ED_ROW_NOT_A_GRANT_YEAR = "ed_list_row_not_a_grant_year"  # FAIN in USAspending, but no Grant-year in the window
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
-HOST_LINKS = "host_links"  # one row per FAIN: outcome, Case label, Host, Host confidence
+HOST_LINKS_BY_RULE = "host_links_by_rule"  # the rule cascade's own decision per FAIN
+HOST_LINKS = "host_links"  # one row per FAIN after gating and overrides: what the outputs show
+CASE_LABEL_ACCURACY = "case_label_accuracy"  # per Case label: answer-key checks, accuracy, gating
 HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its signals
 FUNDING_STATUS = "funding_status"  # one row per (FAIN, Budget period)
 GRANT_FUNDING_STATUS = "grant_funding_status"  # one row per FAIN
+RECONCILIATION = "reconciliation"  # one row per (check, Program, FY)
+ED_LIST_FAIN_DIFFERENCES = "ed_list_fain_differences"  # TRIO ED-list rows that disagree with USAspending, by FAIN
+UNFUNDED_ED_LIST_EVIDENCE = "unfunded_ed_list_evidence"  # per (Program, FY) plus an overall row
+# Succession and lookback (#39). Lookback Grants feed only these tables, never amounts or reconciliation.
+LOOKBACK_GRANTS = "lookback_grants"  # Grants that ended before the window, back to the lookback horizon
+LOOKBACK_HOST_LINKS = "lookback_host_links"
+COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date, new Grants
+GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
+SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
+HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
 
 
 @dataclass(frozen=True)
@@ -97,16 +141,49 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.grant_actions.write_parquet(config.layout.joined_table("grant_actions"))
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
-    host_links, host_link_candidates = build_host_links(
-        universe.grants, actions, HostLookups.from_directory(ipeds.read_directory(config)),
-        ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
-    )
-    host_links.write_parquet(config.layout.joined_table(HOST_LINKS))
-    host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
-    _join_funding_status(config, universe, context)
+    lookups = HostLookups.from_directory(ipeds.read_directory(config), ccd.read_lea_directory(config))
+    host_links, after_rules = _join_host_links(config, universe, actions, lookups)
+    successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
+    _join_funding_status(config, universe, context, successors)
     _join_ed_lists(config, universe, actions, pull_date)
+    _join_reconciliation(config, universe, context)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
+
+
+def _join_host_links(
+    config: Config, universe: GrantUniverse, actions: pl.DataFrame, lookups: HostLookups
+) -> tuple[pl.DataFrame, Callable[[pl.DataFrame], pl.DataFrame]]:
+    """Rule cascade, then answer-key gating, then overrides (ADR 0002).
+
+    Returns the final Host links and the same after-the-rules step, for Host links
+    built elsewhere (lookback Grants) to be gated and overridden alike.
+    """
+    rule_links, candidates = build_host_links(universe.grants, actions, lookups, _ed_trio_rows(config))
+    answer_key = curated.read_answer_key(config)
+    check_separate(answer_key, curated.read_tuning_set(config))
+    overrides = curated.read_overrides(config)
+    host_names = {
+        **{(UNITID, uid): unit.name for uid, unit in lookups.units.items()},
+        **{(LEAID, leaid): district.name for leaid, district in lookups.districts.items()},
+    }
+    links, accuracy = gate_and_override(
+        rule_links, answer_key, overrides, Gate.from_section(config.section("host_linking")), host_names
+    )
+    rule_links.write_parquet(config.layout.joined_table(HOST_LINKS_BY_RULE))
+    links.write_parquet(config.layout.joined_table(HOST_LINKS))
+    candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
+    accuracy.write_parquet(config.layout.joined_table(CASE_LABEL_ACCURACY))
+
+    def after_rules(other_rule_links: pl.DataFrame) -> pl.DataFrame:
+        return apply_overrides(gate_host_links(other_rule_links, accuracy), overrides, host_names)
+
+    return links, after_rules
+
+
+def _ed_trio_rows(config: Config) -> pl.DataFrame:
+    """The cleaned ED TRIO list rows: the Host linker reads their "Recipient/ campus" text by exact FAIN."""
+    return ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE)
 
 
 def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pull_date: dt.date) -> None:
@@ -127,10 +204,35 @@ def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pu
     )
 
 
-def _join_funding_status(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+def _join_succession(
+    config: Config, universe: GrantUniverse, actions: pl.DataFrame, host_links: pl.DataFrame, lookups: HostLookups,
+    after_rules: Callable[[pl.DataFrame], pl.DataFrame],
+) -> dict[str, set[str]]:
+    """Lookback Grants, Cohort starts, Succession links and hand-offs; returns FAIN -> successor FAINs."""
+    settings = LookbackSettings.from_config(config)
+    lookback = build_lookback(actions, universe.window, settings.from_fy_by_family)
+    lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups, _ed_trio_rows(config))[0])
+    grants = pl.concat([universe.grants, lookback.grants])
+    grant_actions = pl.concat([universe.grant_actions, lookback.grant_actions])
+    cohort_starts, grant_cohorts = derive_cohorts(grants, grant_actions, settings.cohort_min_share)
+    successions = build_successions(grants, pl.concat([host_links, lookback_host_links]), grant_cohorts)
+    hand_offs = detect_hand_offs(grant_actions)
+    tables = {
+        LOOKBACK_GRANTS: lookback.grants, LOOKBACK_HOST_LINKS: lookback_host_links, COHORT_STARTS: cohort_starts,
+        GRANT_COHORTS: grant_cohorts, SUCCESSIONS: successions, HAND_OFFS: hand_offs,
+    }
+    for name, frame in tables.items():
+        frame.write_parquet(config.layout.joined_table(name))
+    return successor_fains(successions, hand_offs)
+
+
+def _join_funding_status(
+    config: Config, universe: GrantUniverse, context: RunContext, successors: dict[str, set[str]]
+) -> None:
     """Read Funding status under the As-of date, write it to the joined layer, append the history."""
     periods, per_grant = read_grants_funding_status(
-        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of
+        universe.grants, universe.grant_actions, ReadWindows.from_config(config), context.as_of,
+        successor_fains=successors,
     )
     run_log.record(
         config, layer="join", source=GRANT_FUNDING_STATUS, rows_in=universe.grants.height,
@@ -182,6 +284,42 @@ def _log_ed_lists(
     )
 
 
+def _join_reconciliation(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Compare with outside totals; a duplicate key stops the run, misses only warn."""
+    curated_totals.record_inputs(config)
+    inputs = ReconciliationInputs(
+        window=universe.window,
+        pull_date=context.pull_date,
+        appropriations=curated_totals.read_appropriations(config),
+        allocations=curated_totals.read_allocations(config),
+        grants=universe.grants,
+        grant_actions=universe.grant_actions,
+        ed_trio_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
+        ed_gearup_list_rows=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.GEARUP_TABLE),
+        ed_list_coverage=ed_grantee_lists.read_cleaned(config, ed_grantee_lists.COVERAGE_TABLE),
+        funding_status=pl.read_parquet(config.layout.joined_table(FUNDING_STATUS)),
+    )
+    result = build_reconciliation(inputs, Tolerances.from_config(config))
+    table = result.table
+    misses = table.filter(pl.col("reconciliation_status") != RECONCILED).filter(
+        ~pl.col("gap_reason_code").is_in(["not_published", "no_ed_list"])
+    )
+    if misses.height:
+        named = "; ".join(
+            f"{code} {n}" for code, n in misses.group_by("gap_reason_code").len().sort("gap_reason_code").iter_rows()
+        )
+        warn(f"{misses.height} reconciliation rows do not reconcile ({named})")
+    table.write_parquet(config.layout.joined_table(RECONCILIATION))
+    result.ed_list_fain_differences.write_parquet(config.layout.joined_table(ED_LIST_FAIN_DIFFERENCES))
+    result.unfunded_ed_list_evidence.write_parquet(config.layout.joined_table(UNFUNDED_ED_LIST_EVIDENCE))
+    if result.evidence_is_large:
+        overall = result.unfunded_ed_list_evidence.filter(pl.col("fiscal_year").is_null()).row(0, named=True)
+        warn(
+            f"{overall['with_ed_list_evidence']} of {overall['unfunded_budget_periods']} unfunded Budget periods "
+            "are funded on an ED grantee list: unfunded status partly reflects USAspending reporting gaps"
+        )
+
+
 def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
     joined = config.layout.joined
     context_path = joined / RUN_CONTEXT
@@ -202,24 +340,97 @@ def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
 @dataclass(frozen=True)
 class Delivered:
     target_list_csv: Path
+    target_list_xlsx: Path
+    review_queue_csv: Path
+    match_quality: Path
+    reconciliation_csv: Path
 
 
 def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
-    rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
+    funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
+    cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
+    settings = TargetListSettings.from_section(config.section("target_list"))
+    rows = build_target_list(
+        universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
+        cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
+    )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS)
         ),
     )
-    path = write_target_list_csv(rows, config.layout.output, context.pull_date)
+    readme = ReadmeFacts(
+        pull_date=context.pull_date,
+        as_of=context.as_of,
+        window=context.window,
+        settings=settings,
+        provisional=provisional_fiscal_years(context.window, context.pull_date, settings.provisional_lag_days),
+        awaited=awaited_notes(universe, settings),
+    )
+    files = write_target_list(rows, readme, config.layout.output)
+    for path in (files.xlsx, files.csv):
+        provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
+    candidates = pl.read_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
+    lookback_grants = pl.read_parquet(config.layout.joined_table(LOOKBACK_GRANTS))
+    queue = build_review_queue(
+        host_links, candidates, universe.grants, universe.fy_obligations,
+        succession_pool=pl.concat([universe.grants, lookback_grants], how="diagonal_relaxed"),
+    )
+    queue_path = write_review_queue_csv(queue, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, queue_path, as_of=context.as_of, pull_date=context.pull_date)
+    quality = render_match_quality(
+        MatchQualityInputs(
+            pull_date=context.pull_date,
+            as_of=context.as_of,
+            grants=universe.grants,
+            fy_obligations=universe.fy_obligations,
+            host_links=host_links,
+            candidates=candidates,
+            accuracy=pl.read_parquet(config.layout.joined_table(CASE_LABEL_ACCURACY)),
+            gate=Gate.from_section(config.section("host_linking")),
+            answer_key_rows=curated.read_answer_key(config).height,
+            tuning_set_rows=curated.read_tuning_set(config).height,
+            input_hashes=_input_hashes(config),
+        )
+    )
+    quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, quality_path, as_of=context.as_of, pull_date=context.pull_date)
+    reconciliation_csv = _report_reconciliation(config, context)
+    return Delivered(
+        target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
+        reconciliation_csv=reconciliation_csv,
+    )
+
+
+def _input_hashes(config: Config) -> list[tuple[str, str]]:
+    """(path, sha256) of the config, the curated files and every raw file behind the cleaned layer."""
+    base = config.path.parent
+    own = [config.path, *sorted(p for p in config.layout.curated.glob("*") if p.is_file())]
+    return [
+        *((p.relative_to(base).as_posix(), provenance.file_sha256(p)) for p in own),
+        *((f["path"], f["sha256"]) for f in provenance.raw_inputs(config)),
+    ]
+
+
+def _report_reconciliation(config: Config, context: RunContext) -> Path:
+    source = config.layout.joined_table(RECONCILIATION)
+    table = pl.read_parquet(source)
+    run_log.record(
+        config, layer="report", source=RECONCILIATION, rows_in=table.height, rows_out=table.height, drops={},
+        pull_date=context.pull_date, input_hash=provenance.file_sha256(source),
+    )
+    path = write_reconciliation_csv(table, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
-    return Delivered(target_list_csv=path)
+    evidence = pl.read_parquet(config.layout.joined_table(UNFUNDED_ED_LIST_EVIDENCE))
+    evidence_path = write_evidence_csv(evidence, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, evidence_path, as_of=context.as_of, pull_date=context.pull_date)
+    return path
 
 
 def run(config: Config, as_of: dt.date | None = None) -> Delivered:

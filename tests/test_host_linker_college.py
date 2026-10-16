@@ -63,7 +63,8 @@ def grant(fain, name, state, uei=None, *, ed=None, desc=None, city=None, zip=Non
     ed_campus = (ed.partition("/")[2].strip() or None) if ed else None
     return GrantFacts(
         fain=fain, recipient_name=name, recipient_uei=uei, recipient_state=state, business_types=business_types,
-        recipient_city=city, recipient_zip=zip, description=desc, ed_recipient_campus=ed, ed_campus=ed_campus,
+        recipient_city=city, recipient_zip=zip, descriptions=(desc,) if desc else (), ed_recipient_campus=ed,
+        ed_campus=ed_campus,
         start_year=start_year,
     )
 

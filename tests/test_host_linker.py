@@ -8,6 +8,7 @@ with a fixture IPEDS directory standing in for Urban's bulk CSV.
 from __future__ import annotations
 
 import pytest
+from support.ccd import lea_directory, lea_row
 from support.ipeds import directory, directory_row
 
 from topo.domain.host_linking import GrantFacts, HostLookups, link_host
@@ -106,7 +107,7 @@ CASES = {
     ),
     "gearup_partnership_college_partner_is_never_the_host": (
         grant("P334A180001", "ROCKY MOUNTAIN COLLEGE", "MT", "RMCUEI000001"),
-        ("unmatched", "no_candidate_gearup_partnership", None, None),
+        ("no_single_host", "gearup_partnership_no_district_named", None, None),
     ),
 }
 
@@ -164,3 +165,125 @@ def test_a_system_office_never_beats_a_real_campus():
 def test_no_single_host_is_distinct_from_unmatched():
     outcomes = {link_host(facts, LOOKUPS).outcome for facts, _ in CASES.values()}
     assert {"matched", "review", "no_single_host", "unmatched"} <= outcomes
+
+
+# ------------------------------------------------- GEAR UP partnership districts (#36)
+# A partnership's Host is the district it serves, named in the award description or
+# being the Recipient itself; never the college partner. CCD LEA directory fixtures.
+
+DISTRICTS = HostLookups.from_directory(
+    directory(
+        directory_row("228796", "The University of Texas at El Paso", "TX", ueis=("UTEPUEI00001",)),
+        directory_row("230038", "Weber State University", "UT", ueis=("WEBERUEI0001",)),
+    ),
+    lea_directory(
+        lea_row("4840860", "Socorro Independent School District", "TX"),
+        lea_row("4818300", "El Paso Independent School District", "TX"),
+        lea_row("4900630", "Ogden City School District", "UT"),
+        # A same-named district across a state line must never be a candidate
+        lea_row("1600001", "Ogden School District", "ID"),
+        # Two Utah districts share the core name "Jordan": one mention can't pick between them
+        lea_row("4900420", "Jordan School District", "UT"),
+        lea_row("4900421", "Jordan Public Schools", "UT"),
+        # A renamed district: the 2016 name still finds it
+        lea_row("4800002", "Ysleta ISD", "TX", year=2016),
+        lea_row("4800002", "Ysleta Independent School District", "TX", year=2024),
+    ),
+)
+SCHOOL_DISTRICT = "INDEPENDENT SCHOOL DISTRICT"
+
+
+def partnership(fain, name, state, *descriptions, uei=None, business_types=IHE_PUBLIC):
+    return GrantFacts(fain=fain, recipient_name=name, recipient_uei=uei, recipient_state=state,
+                      business_types=business_types, descriptions=descriptions)
+
+
+DISTRICT_CASES = {
+    "district_named_in_desc": (
+        partnership("P334A210001", "UNIVERSITY OF TEXAS AT EL PASO", "TX",
+                    "GEAR UP PARTNERSHIP SERVING SOCORRO INDEPENDENT SCHOOL DISTRICT", uei="UTEPUEI00001"),
+        ("matched", "district_named_in_desc", "LEAID", "4840860"),
+    ),
+    "district_named_by_a_short_form": (
+        partnership("P334A210002", "UNIVERSITY OF TEXAS AT EL PASO", "TX", "PROJECT ADVANCE - SOCORRO ISD COHORT"),
+        ("matched", "district_named_in_desc", "LEAID", "4840860"),
+    ),
+    "district_named_by_a_former_name": (
+        partnership("P334A210003", "UNIVERSITY OF TEXAS AT EL PASO", "TX", "GEAR UP YSLETA ISD"),
+        ("matched", "district_named_in_desc", "LEAID", "4800002"),
+    ),
+    "district_is_recipient": (
+        partnership("P334A210004", "BOARD OF EDUCATION OF OGDEN CITY", "UT", "GEAR UP PARTNERSHIP",
+                    business_types=SCHOOL_DISTRICT),
+        ("matched", "district_is_recipient", "LEAID", "4900630"),
+    ),
+    "district_recipient_named_again_in_desc": (
+        partnership("P334A210005", "OGDEN CITY SCHOOL DISTRICT", "UT", "OGDEN SCHOOL DISTRICT GEAR UP",
+                    business_types=SCHOOL_DISTRICT),
+        ("matched", "district_is_recipient", "LEAID", "4900630"),
+    ),
+    "gearup_partnership_no_district_named": (
+        partnership("P334A210006", "WEBER STATE UNIVERSITY", "UT", "GEAR UP PARTNERSHIP PROJECT", uei="WEBERUEI0001"),
+        ("no_single_host", "gearup_partnership_no_district_named", None, None),
+    ),
+    "several_districts_named": (
+        partnership("P334A210007", "UNIVERSITY OF TEXAS AT EL PASO", "TX",
+                    "GEAR UP: SOCORRO ISD AND EL PASO INDEPENDENT SCHOOL DISTRICT"),
+        ("no_single_host", "several_districts_named", None, None),
+    ),
+    "district_name_ambiguous": (
+        partnership("P334A210008", "WEBER STATE UNIVERSITY", "UT", "GEAR UP JORDAN SCHOOLS"),
+        ("review", "district_name_ambiguous", None, None),
+    ),
+    "cross_state_district_never_named": (
+        partnership("P334A210009", "WEBER STATE UNIVERSITY", "ID", "GEAR UP SOCORRO INDEPENDENT SCHOOL DISTRICT"),
+        ("no_single_host", "gearup_partnership_no_district_named", None, None),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(DISTRICT_CASES))
+def test_gear_up_partnership_district_policy(case):
+    facts, (outcome, case_label, host_kind, host_id) = DISTRICT_CASES[case]
+
+    link = link_host(facts, DISTRICTS)
+
+    assert (link.outcome, link.case_label, link.host_kind, link.host_id) == (outcome, case_label, host_kind, host_id)
+
+
+@pytest.mark.parametrize("case", list(DISTRICT_CASES))
+def test_a_partnerships_college_partner_is_never_a_candidate(case):
+    link = link_host(DISTRICT_CASES[case][0], DISTRICTS)
+    assert all(c.host_kind == "LEAID" for c in link.candidates)
+
+
+def test_a_district_host_carries_its_name_and_signals():
+    link = link_host(DISTRICT_CASES["district_named_in_desc"][0], DISTRICTS)
+    assert link.host_name == "Socorro Independent School District"
+    assert [(c.host_kind, c.host_id, c.signals) for c in link.candidates] == [("LEAID", "4840860", ("desc",))]
+    recipient = link_host(DISTRICT_CASES["district_recipient_named_again_in_desc"][0], DISTRICTS)
+    assert [(c.host_id, c.signals) for c in recipient.candidates] == [("4900630", ("desc", "name"))]
+
+
+def test_several_named_districts_are_all_kept_as_candidates():
+    link = link_host(DISTRICT_CASES["several_districts_named"][0], DISTRICTS)
+    assert {c.host_id for c in link.candidates} == {"4840860", "4818300"}
+    ambiguous = link_host(DISTRICT_CASES["district_name_ambiguous"][0], DISTRICTS)
+    assert {c.host_id for c in ambiguous.candidates} == {"4900420", "4900421"}
+
+
+def test_a_district_in_another_state_is_never_a_candidate():
+    # "Ogden School District" exists in Idaho; the Utah Recipient's description names Ogden.
+    link = link_host(partnership("P334A210010", "WEBER STATE UNIVERSITY", "UT", "GEAR UP OGDEN SCHOOL DISTRICT"),
+                     DISTRICTS)
+    assert (link.outcome, link.host_id) == ("matched", "4900630")
+    assert {c.host_id for c in link.candidates} == {"4900630"}
+
+
+def test_districts_are_looked_up_only_for_gear_up_partnerships():
+    # A TRIO Grant whose description names a district still links by college rules.
+    link = link_host(partnership("P042A210011", "WEBER STATE UNIVERSITY", "UT", "OGDEN CITY SCHOOL DISTRICT",
+                                 uei="WEBERUEI0001"), DISTRICTS)
+    assert (link.outcome, link.case_label, link.host_kind, link.host_id) == (
+        "matched", "uei_confirmed", "UNITID", "230038",
+    )

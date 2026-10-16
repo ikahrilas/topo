@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import polars as pl
-from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
 from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
+from support.ipeds import (
+    DIRECTORY_COLUMNS,
+    ENROLLMENT_COLUMNS,
+    directory_row,
+    enrollment_row,
+    write_csv,
+)
 from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
@@ -51,7 +57,9 @@ def test_target_list_shows_host_case_label_and_confidence_next_to_the_recipient(
 
     rows = project.read_csv(f"target_list_{PULL}.csv")
     columns = list(rows[0])
-    assert columns[:6] == ["Recipient", "Recipient UEI", "Host institution", "Host ID", "Host confidence", "Case label"]
+    at = columns.index("Recipient")  # column order from #26
+    assert columns[at:at + 9] == ["Recipient", "Recipient UEI", "Host institution", "Host ID", "State", "Program",
+                                  "FAIN", "Host confidence", "Case label"]
     got = {
         fain: (r["Host institution"], r["Host ID"], r["Host confidence"], r["Case label"])
         for fain, r in by_fain(rows).items()

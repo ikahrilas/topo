@@ -33,7 +33,7 @@ def read_manifest(project) -> list[dict[str, str]]:
 
 def fake_usaspending_http(monkeypatch, project):
     """`topo pull usaspending` without the network: one Full archive for FY2027."""
-    project.set_config("pull_from_fy = 2015", "pull_from_fy = 2027")
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
 
     def post_json(url, body):
         name = f"FY{body['fiscal_year']}_091_Assistance_Full_20261006.zip"
@@ -224,8 +224,8 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
 
     project.topo("run", "--as-of", PULL)
 
-    clean, join, funding, report = run_log(project)
-    assert len({clean["run_id"], join["run_id"], funding["run_id"], report["run_id"]}) == 1
+    clean, join, funding, report, reconciliation = run_log(project)
+    assert len({clean["run_id"], join["run_id"], funding["run_id"], report["run_id"], reconciliation["run_id"]}) == 1
     assert (clean["layer"], clean["source"]) == ("clean", "usaspending")
     assert (clean["rows_in"], clean["rows_out"]) == (7, 6)
     assert drops(clean) == {"not_a_trio_gear_up_listing": 1}
@@ -242,6 +242,9 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
     assert (report["layer"], report["source"]) == ("report", "target_list")
     assert (report["rows_in"], report["rows_out"], drops(report)) == (1, 1, {})
 
+    assert (reconciliation["layer"], reconciliation["source"]) == ("report", "reconciliation")
+    assert reconciliation["rows_in"] == reconciliation["rows_out"] > 0 and drops(reconciliation) == {}
+
 
 def test_the_run_log_is_append_only(project):
     one_grant(project)
@@ -251,8 +254,8 @@ def test_the_run_log_is_append_only(project):
     project.topo("run", "--as-of", PULL)
     second = run_log(project)
 
-    assert len(first) == 4 and second[:4] == first and len(second) == 8
-    assert second[4]["run_id"] != first[0]["run_id"]
+    assert len(first) == 5 and second[:5] == first and len(second) == 10
+    assert second[5]["run_id"] != first[0]["run_id"]
 
 
 def test_a_row_count_mismatch_between_layers_stops_the_run(project):
