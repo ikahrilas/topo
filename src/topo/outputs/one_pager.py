@@ -16,7 +16,7 @@ from typing import Any
 
 import polars as pl
 
-from topo.domain.funding_status import DISRUPTION_RESTORED, FUNDED_LATE, REVERSED, UNFUNDED
+from topo.domain.funding_status import DISRUPTION_RESTORED, FUNDED_LATE, REVERSED, UNFUNDED, add_months
 from topo.domain.programs import PROGRAMS
 from topo.fiscal import ReportingWindow, fy_label
 from topo.outputs.delivery import delivery_paths, write_new
@@ -32,6 +32,7 @@ DISRUPTION_PATTERNS = (UNFUNDED, FUNDED_LATE, REVERSED)
 # Trust item keys
 PROVISIONAL = "provisional"
 PATTERN = "pattern"
+UNTESTED = "untested"
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,10 @@ class OnePagerInputs:
     disruption_window: tuple[dt.date, dt.date] = (dt.date(2025, 5, 1), dt.date(2026, 9, 30))
     evidence: pl.DataFrame | None = None  # joined unfunded_ed_list_evidence (with the `large` trigger)
     settings: OnePagerSettings = OnePagerSettings()
+    grant_actions: pl.DataFrame | None = None  # joined grant_actions (award dates and dollars of new Grants)
+    timing: pl.DataFrame | None = None  # joined renewal_timing: Re-competing soon, Predicted due date, evidence tier
+    new_award_months: int = 3  # [target_list] new_award_months
+    lead_months: int = 12  # [renewal_timing] lead_months
 
 
 @dataclass(frozen=True)
@@ -111,6 +116,10 @@ def _trust_items(inputs: OnePagerInputs) -> TrustItems:
     items.append((PATTERN, (
         "Funding status is a pattern read from funding actions, never a cause: gaps are routine, a court record "
         "names only a few Grants, and the counts are not proof of a policy cut."
+    )))
+    items.append((UNTESTED, (
+        "Predicted due dates are predictions not yet tested: each is the prior Cohort's published deadline plus "
+        "60 months (or a deadline already published), and the rule's backtest has not been scored."
     )))
     return TrustItems(items)
 
@@ -177,6 +186,65 @@ def _whats_changed(inputs: OnePagerInputs, trust: TrustItems) -> list[str]:
     return out
 
 
+def _whats_coming_up(inputs: OnePagerInputs, trust: TrustItems) -> list[str]:
+    timing = inputs.timing
+    soon = (
+        timing.filter(pl.col("re_competing_soon"))
+        .join(inputs.grants.select("fain", "program"), on="fain")
+        .group_by("program", "predicted_due_date", "evidence_tier")
+        .agg(pl.len().alias("grants"))
+        .sort("predicted_due_date", "program")
+        if timing is not None else pl.DataFrame()
+    )
+    out = []
+    if soon.height:
+        out += [
+            f"Programs with Grants re-competing within {inputs.lead_months} months of the As-of date. The dates are "
+            "predictions of the next application deadline, not announced dates unless the evidence tier says "
+            "notice published.",
+            "",
+        ]
+        out += _table(
+            ["Program", "Predicted due date", "Evidence tier", "Grants re-competing"],
+            [[r["program"], f"{r['predicted_due_date'].isoformat()} {trust.marker(UNTESTED, 'untested')}",
+              r["evidence_tier"], r["grants"]] for r in soon.iter_rows(named=True)],
+        )
+    else:
+        out.append(
+            f"No Program has Grants re-competing within {inputs.lead_months} months of the As-of date by the "
+            f"predicted due dates on file {trust.marker(UNTESTED, 'untested')}."
+        )
+    months = inputs.new_award_months
+    out += ["", f"### New Grants in the last {months} months", ""]
+    new = _new_grants(inputs)
+    if new.height:
+        out += _table(
+            ["Program", "New Grants", "Dollars"],
+            [[r["program"], r["grants"], money(r["dollars"])] for r in new.iter_rows(named=True)],
+        )
+    else:
+        out.append(f"No new Grants were awarded in the {months} months up to the As-of date.")
+    return out
+
+
+def _new_grants(inputs: OnePagerInputs) -> pl.DataFrame:
+    """Per Program: Grants whose first award (A1) is within `new_award_months` before the As-of date."""
+    if inputs.grant_actions is None:
+        return pl.DataFrame()
+    actions = inputs.grant_actions.filter(pl.col("action_date") <= inputs.as_of)
+    awarded = actions.filter(pl.col("action_type") == "A1").group_by("fain").agg(
+        pl.col("action_date").min().alias("award_date"))
+    since = add_months(inputs.as_of, -inputs.new_award_months)
+    new = awarded.filter(pl.col("award_date") >= since)["fain"]
+    return (
+        actions.filter(pl.col("fain").is_in(new.implode()))
+        .join(inputs.grants.select("fain", "program"), on="fain")
+        .group_by("program")
+        .agg(pl.col("fain").n_unique().alias("grants"), pl.col("obligation").sum().alias("dollars"))
+        .sort("program")
+    )
+
+
 def _table(header: list[str], rows: list[list]) -> list[str]:
     def cell(value) -> str:
         return "" if value is None else str(value).replace("|", "/")
@@ -201,6 +269,8 @@ def render_one_pager(inputs: OnePagerInputs) -> str:
         *_whats_changed(inputs, trust),
         "",
         "## What's coming up",
+        "",
+        *_whats_coming_up(inputs, trust),
         "",
         "## How far to trust this",
         "",

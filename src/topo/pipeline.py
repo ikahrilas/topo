@@ -473,6 +473,10 @@ def _report_one_pager(
         disruption_window=(windows.disruption_start, windows.disruption_end),
         evidence=pl.read_parquet(config.layout.joined_table(UNFUNDED_ED_LIST_EVIDENCE)),
         settings=OnePagerSettings.from_section(config.section("one_pager")),
+        grant_actions=universe.grant_actions,
+        timing=pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING)),
+        new_award_months=settings.new_award_months,
+        lead_months=RenewalSettings.from_config(config).lead_months,
     ))
     files = write_one_pager(text, config.layout.output, context.pull_date)
     for path in (files.markdown, files.pdf):

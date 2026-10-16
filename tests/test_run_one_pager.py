@@ -147,3 +147,42 @@ def test_the_reporting_gap_sentence_appears_only_when_ed_lists_fund_enough_unfun
 
     words = prose(one_pager(project), "What's changed since 2025")
     assert "Unfunded status may partly reflect USAspending reporting gaps: 1 of 1 unfunded Budget periods" in words
+
+
+UB_FY2022_DEADLINE = ("Upward Bound,2022,2022-01-31,"
+                      "Applications for New Awards; Upward Bound Program (86 FR 71477; Dec. 16 2021),,\n")
+
+
+def test_whats_coming_up_lists_re_competing_programs_and_new_grants_from_the_last_3_months(project):
+    curated = project.root / "data" / "curated"
+    curated.mkdir(parents=True)
+    (curated / "deadlines.csv").write_text(
+        "program,competition_fy,application_deadline,citation,source_url,note\n" + UB_FY2022_DEADLINE)
+    write_actions(project.raw_usaspending, PULL, [
+        *grant("P047A170001", 2017, 5), *grant("P047A170002", 2017, 5),  # the prior Upward Bound Cohort
+        *grant("P047A220001", 2022, 5), *grant("P047A220002", 2022, 5),  # re-competing soon: due 2027-01-31
+        action("P042A260001", 1, "2026-08-15", 400_000, ("2026-09-01", "2027-08-31"), action_type="A1"),  # new
+        action("P042A260002", 1, "2026-06-01", 400_000, ("2026-06-01", "2027-05-31"), action_type="A1"),  # 4 months
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    text = one_pager(project)
+    [row] = table(text, "What's coming up")
+    assert (row["Program"], row["Evidence tier"], row["Grants re-competing"]) == ("Upward Bound", "inferred", "2")
+    assert row["Predicted due date"].startswith("2027-01-31 [untested")
+    assert "not yet tested" in marked(row["Predicted due date"], "untested", text)
+    assert "prediction" in prose(text, "What's coming up")
+    new = table(text, "New Grants in the last 3 months")
+    assert [(r["Program"], r["New Grants"], r["Dollars"]) for r in new] == [("Student Support Services", "1", "$400K")]
+
+
+def test_with_nothing_re_competing_the_section_says_so(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 5))
+
+    project.topo("run", "--as-of", PULL)
+
+    text = one_pager(project)
+    assert table(text, "What's coming up") == []
+    assert "No Program has Grants re-competing" in prose(text, "What's coming up")
+    assert "No new Grants" in prose(text, "New Grants in the last 3 months")

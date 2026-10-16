@@ -1,7 +1,7 @@
 """Render the one-pager's Markdown to a one-page PDF (fpdf2, core fonts).
 
 Only the Markdown the pipeline writes is understood: `#`/`##` headings, plain
-paragraphs (with **bold**), `- ` bullets, `1. ` numbered items, pipe tables, and
+paragraphs (with **bold**), `###` subheadings, numbered items, pipe tables, and
 a `---` rule after which every line is the page footer. The font shrinks in
 steps until the page fits; text is encoded as Windows-1252 (core fonts).
 """
@@ -81,6 +81,9 @@ def _draw(pdf: _Page, body: list[str]) -> None:
             pdf.ln(1)
             pdf.set_font(FONT, "B", size + 1.5)
             pdf.multi_cell(0, line_h * 1.3, _plain(line[3:]), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        elif line.startswith("### "):
+            pdf.set_font(FONT, "B", size)
+            pdf.multi_cell(0, line_h * 1.2, _plain(line[4:]), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         elif line.strip():
             pdf.set_font(FONT, "", size)
             pdf.multi_cell(0, line_h, _plain(line), markdown=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
