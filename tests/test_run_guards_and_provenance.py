@@ -224,8 +224,8 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
 
     project.topo("run", "--as-of", PULL)
 
-    clean, join, funding, timing, report = run_log(project)
-    assert len({clean["run_id"], join["run_id"], funding["run_id"], timing["run_id"], report["run_id"]}) == 1
+    clean, join, funding, timing, report, reconciliation = run_log(project)
+    assert len({r["run_id"] for r in (clean, join, funding, timing, report, reconciliation)}) == 1
     assert (clean["layer"], clean["source"]) == ("clean", "usaspending")
     assert (clean["rows_in"], clean["rows_out"]) == (7, 6)
     assert drops(clean) == {"not_a_trio_gear_up_listing": 1}
@@ -245,6 +245,9 @@ def test_every_layer_appends_rows_in_rows_out_and_named_drops_to_the_run_log(pro
     assert (report["layer"], report["source"]) == ("report", "target_list")
     assert (report["rows_in"], report["rows_out"], drops(report)) == (1, 1, {})
 
+    assert (reconciliation["layer"], reconciliation["source"]) == ("report", "reconciliation")
+    assert reconciliation["rows_in"] == reconciliation["rows_out"] > 0 and drops(reconciliation) == {}
+
 
 def test_the_run_log_is_append_only(project):
     one_grant(project)
@@ -254,8 +257,8 @@ def test_the_run_log_is_append_only(project):
     project.topo("run", "--as-of", PULL)
     second = run_log(project)
 
-    assert len(first) == 5 and second[:5] == first and len(second) == 10
-    assert second[5]["run_id"] != first[0]["run_id"]
+    assert len(first) == 6 and second[:6] == first and len(second) == 12
+    assert second[6]["run_id"] != first[0]["run_id"]
 
 
 def test_a_row_count_mismatch_between_layers_stops_the_run(project):

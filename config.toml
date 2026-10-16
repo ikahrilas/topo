@@ -21,6 +21,19 @@ start_fy = 2021
 # Reconciliation (#14): within 1% or $1M, whichever is larger.
 reconciliation_relative = 0.01
 reconciliation_absolute_usd = 1_000_000
+# ASSUMPTION: ED per-program award counts vs USAspending Grants funded, within 1%.
+# ED grantee lists are compared exactly (no tolerance).
+reconciliation_count_relative = 0.01
+
+[reconciliation]
+# A fiscal year less than [target_list] provisional_lag_days past its end on the
+# Pull date that does not reconcile is `provisional`, not failed (#14).
+# ASSUMPTION (#14): ED-list evidence for unfunded Budget periods (on an ED list
+# with funding, no USAspending action) is "large" at 5% or more overall, or over
+# 10% in any Program x FY; the one-pager must then say unfunded status partly
+# reflects USAspending reporting gaps. Evidence never changes Funding status.
+evidence_large_share_overall = 0.05
+evidence_large_share_program_fy = 0.10
 
 [usaspending]
 # Award Data Archive fiscal years fetched by `topo pull usaspending`
