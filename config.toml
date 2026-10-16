@@ -64,6 +64,12 @@ disruption_window_end = 2026-09-30
 TRIO = 5
 "GEAR UP" = 6
 
+[api_keys]
+# Environment variables holding API keys (never the keys themselves). Set them in
+# the shell or in a .env file beside this one; .env is git-ignored. Only the
+# Census API takes a key.
+census = "CENSUS_API_KEY"
+
 [ccd]
 # Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
 # fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.

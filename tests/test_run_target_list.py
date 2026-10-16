@@ -178,7 +178,7 @@ def test_a_duplicate_fain_in_the_grant_table_stops_the_run(project):
     result = project.topo("run", "--as-of", PULL, expect_exit=2)
 
     assert "duplicate fain in the Grant table: P044A220001" in result.output
-    assert not project.output.exists()
+    assert not list(project.output.glob("target_list_*"))
 
 
 def test_no_duns_or_individual_person_field_is_ingested(project):
