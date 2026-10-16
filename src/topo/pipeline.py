@@ -28,6 +28,13 @@ from topo.domain.grant_universe import (
 )
 from topo.domain.host_gating import Gate, apply_overrides, check_separate, gate_and_override, gate_host_links
 from topo.domain.host_linking import LEAID, UNITID, HostLookups, build_host_links
+from topo.domain.renewal_timing import (
+    RenewalSettings,
+    new_award_fys,
+    predict_cohort_timing,
+    read_deadline_table,
+    read_renewal_timing,
+)
 from topo.domain.succession import (
     LookbackSettings,
     build_successions,
@@ -58,6 +65,8 @@ from topo.outputs.fac_plausibility import write_plausibility_csv
 from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
+from topo.review_findings import last_founder_marks, read_review_findings, spot_check_summary
+from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
 from topo.sources import SOURCES, ccd, ed_grantee_lists, fac, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
@@ -81,6 +90,11 @@ COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date,
 GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
 SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
 HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
+# Renewal timing (#40).
+COHORT_TIMING = "cohort_timing"  # (Program, Cohort FY): observed gap, Predicted due date, evidence tier
+RENEWAL_TIMING = "renewal_timing"  # one row per FAIN: Cohort timing, Re-competing soon, GEAR UP end-date fact
+RENEWAL_TIMING_EXCEPTIONS = "renewal_timing_exceptions"  # Budget-period ends that disagree with the Cohort
+DEADLINES = "deadlines"  # the curated deadline table, recorded as an input for provenance sidecars
 
 
 @dataclass(frozen=True)
@@ -148,6 +162,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     host_links, after_rules = _join_host_links(config, universe, actions, lookups)
     successors = _join_succession(config, universe, actions, host_links, lookups, after_rules)
     _join_funding_status(config, universe, context, successors)
+    _join_renewal_timing(config, universe, actions, context)
     _join_ed_lists(config, universe, actions, pull_date)
     _join_reconciliation(config, universe, context)
     _join_fac_plausibility(config, universe, context)
@@ -163,7 +178,7 @@ def _join_host_links(
     Returns the final Host links and the same after-the-rules step, for Host links
     built elsewhere (lookback Grants) to be gated and overridden alike.
     """
-    rule_links, candidates = build_host_links(universe.grants, actions, lookups)
+    rule_links, candidates = build_host_links(universe.grants, actions, lookups, _ed_trio_rows(config))
     answer_key = curated.read_answer_key(config)
     check_separate(answer_key, curated.read_tuning_set(config))
     overrides = curated.read_overrides(config)
@@ -183,6 +198,11 @@ def _join_host_links(
         return apply_overrides(gate_host_links(other_rule_links, accuracy), overrides, host_names)
 
     return links, after_rules
+
+
+def _ed_trio_rows(config: Config) -> pl.DataFrame:
+    """The cleaned ED TRIO list rows: the Host linker reads their "Recipient/ campus" text by exact FAIN."""
+    return ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE)
 
 
 def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pull_date: dt.date) -> None:
@@ -210,7 +230,7 @@ def _join_succession(
     """Lookback Grants, Cohort starts, Succession links and hand-offs; returns FAIN -> successor FAINs."""
     settings = LookbackSettings.from_config(config)
     lookback = build_lookback(actions, universe.window, settings.from_fy_by_family)
-    lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups)[0])
+    lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups, _ed_trio_rows(config))[0])
     grants = pl.concat([universe.grants, lookback.grants])
     grant_actions = pl.concat([universe.grant_actions, lookback.grant_actions])
     cohort_starts, grant_cohorts = derive_cohorts(grants, grant_actions, settings.cohort_min_share)
@@ -243,6 +263,40 @@ def _join_funding_status(
     periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
     per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
+
+
+def _join_renewal_timing(
+    config: Config, universe: GrantUniverse, actions: pl.DataFrame, context: RunContext
+) -> None:
+    """Predicted due dates per Program Cohort and Re-competing soon per Grant (joined layer)."""
+    settings = RenewalSettings.from_config(config)
+    path = config.layout.curated / settings.deadline_table
+    deadline_hash = provenance.record_raw_inputs(config, DEADLINES, [path] if path.exists() else [])
+    cohort_timing = predict_cohort_timing(
+        pl.read_parquet(config.layout.joined_table(COHORT_STARTS)), read_deadline_table(path), settings
+    )
+    windows = ReadWindows.from_config(config)
+    timing, exceptions = read_renewal_timing(
+        universe.grants, universe.grant_actions, pl.read_parquet(config.layout.joined_table(GRANT_COHORTS)),
+        cohort_timing, pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS)),
+        new_award_fys(actions, context.as_of), context.as_of,
+        settings, dict(windows.budget_periods),
+    )
+    run_log.record(
+        config, layer="join", source=RENEWAL_TIMING, rows_in=universe.grants.height, rows_out=timing.height,
+        drops={}, pull_date=context.pull_date,
+        input_hash=provenance.combined_hash([
+            deadline_hash,
+            *(provenance.file_sha256(config.layout.joined_table(name))
+              for name in (COHORT_STARTS, GRANT_COHORTS, GRANT_FUNDING_STATUS)),
+        ]),
+    )
+    if exceptions.height:
+        warn(f"{exceptions.height} Grants have Budget-period ends that disagree with their Cohort "
+             f"({RENEWAL_TIMING_EXCEPTIONS})")
+    cohort_timing.write_parquet(config.layout.joined_table(COHORT_TIMING))
+    timing.write_parquet(config.layout.joined_table(RENEWAL_TIMING))
+    exceptions.write_parquet(config.layout.joined_table(RENEWAL_TIMING_EXCEPTIONS))
 
 
 def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame, pull_date: dt.date) -> None:
@@ -365,6 +419,7 @@ class Delivered:
     match_quality: Path
     reconciliation_csv: Path
     fac_plausibility_csv: Path
+    spot_check: Path
 
 
 def report(config: Config) -> Delivered:
@@ -373,17 +428,20 @@ def report(config: Config) -> Delivered:
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
     cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
+    findings = read_review_findings(config)
     settings = TargetListSettings.from_section(config.section("target_list"))
     rows = build_target_list(
         universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
         cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
+        timing=pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING)),
+        founder_marks=last_founder_marks(findings),
     )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, FUNDING_STATUS, RENEWAL_TIMING)
         ),
     )
     readme = ReadmeFacts(
@@ -395,7 +453,10 @@ def report(config: Config) -> Delivered:
         awaited=awaited_notes(universe, settings),
     )
     files = write_target_list(rows, readme, config.layout.output)
-    for path in (files.xlsx, files.csv):
+    spot_check = write_spot_check(
+        rows, readme, SpotCheckSettings.from_section(config.section("spot_check")), config.layout.output
+    )
+    for path in (files.xlsx, files.csv, spot_check):
         provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     candidates = pl.read_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     lookback_grants = pl.read_parquet(config.layout.joined_table(LOOKBACK_GRANTS))
@@ -418,6 +479,7 @@ def report(config: Config) -> Delivered:
             answer_key_rows=curated.read_answer_key(config).height,
             tuning_set_rows=curated.read_tuning_set(config).height,
             input_hashes=_input_hashes(config),
+            founder_spot_check=spot_check_summary(findings),
         )
     )
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
@@ -429,6 +491,7 @@ def report(config: Config) -> Delivered:
     return Delivered(
         target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
         reconciliation_csv=reconciliation_csv, fac_plausibility_csv=plausibility_csv,
+        spot_check=spot_check,
     )
 
 

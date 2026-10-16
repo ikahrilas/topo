@@ -129,6 +129,25 @@ directory_from_year = 2015
 # 7 independent charter agency (the host-linking prototype's set).
 agency_types = [1, 2, 4, 5, 7]
 
+[renewal_timing]
+# Renewal timing (#40). The Predicted due date of a Program's next competition is
+# the prior Cohort's published deadline (data/curated/<deadline_table>, each row
+# cited) plus `cycle_months`. A Program whose observed gap between Cohort starts
+# isn't `cycle_months` is marked "timing not predicted".
+cycle_months = 60
+# Re-competing soon: the Predicted due date is at most this many months after the
+# As-of date (and the latest readable Funding status is continued or funded late).
+# ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
+lead_months = 12
+deadline_table = "deadlines.csv"
+
+[spot_check]
+# Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
+# (data/curated/review_findings.csv). ASSUMPTION: the founder checks 2–3 states.
+min_states = 2
+max_states = 3
+note_max_chars = 100
+
 [fac]
 # Federal Audit Clearinghouse full bulk CSVs, fetched by `topo pull fac` (no API
 # key; the links redirect to short-lived signed S3 URLs). federal_awards.csv is

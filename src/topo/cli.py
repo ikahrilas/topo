@@ -1,4 +1,4 @@
-"""The `topo` command line: pull <source>, clean <source>, join, report, run."""
+"""The `topo` command line: pull <source>, clean <source>, join, report, run, ingest-findings."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from topo import manifest, pipeline, provenance
+from topo import manifest, pipeline, provenance, review_findings
 from topo.config import Config, load_config
 from topo.guards import RunWarning, StructuralBreak
 from topo.sources import SOURCES
@@ -93,6 +93,22 @@ def pull(
     _guarded(go)
 
 
+@app.command("ingest-findings")
+def ingest_findings(
+    workbook: Path,
+    date: Annotated[str, typer.Option("--date", help="Date the founder reviewed the copy (YYYY-MM-DD).")],
+) -> None:
+    """Append the marks of a returned spot-check copy to data/curated/review_findings.csv."""
+
+    def go():
+        config = _config()
+        written = review_findings.ingest(config, workbook, dt.date.fromisoformat(date))
+        typer.echo(f"appended {written} Review findings to {review_findings.findings_path(config)}")
+
+    # Like `pull`, not under the dirty-tree guard: it writes a committed curated file you then commit.
+    _guarded(go)
+
+
 @app.command()
 def clean(source: str, allow_dirty: AllowDirty = False) -> None:
     """Clean the latest pull of one source into data/cleaned/."""
@@ -111,7 +127,8 @@ def join(as_of: AsOf = None, allow_dirty: AllowDirty = False) -> None:
 def report(allow_dirty: AllowDirty = False) -> None:
     """Write the outputs from the joined layer."""
     delivered = _guarded(lambda: pipeline.report(_config()), allow_dirty)
-    for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
+    for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality,
+                 delivered.spot_check):
         typer.echo(f"wrote {path}")
 
 
@@ -119,5 +136,6 @@ def report(allow_dirty: AllowDirty = False) -> None:
 def run(as_of: AsOf = None, allow_dirty: AllowDirty = False) -> None:
     """Clean every source, join and report in one go."""
     delivered = _guarded(lambda: pipeline.run(_config(), _date(as_of)), allow_dirty)
-    for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality):
+    for path in (delivered.target_list_xlsx, delivered.target_list_csv, delivered.review_queue_csv, delivered.match_quality,
+                 delivered.spot_check):
         typer.echo(f"wrote {path}")
