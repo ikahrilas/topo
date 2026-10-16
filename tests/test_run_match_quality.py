@@ -314,6 +314,8 @@ def test_match_quality_report_shows_linking_quality(project):
     directory = f"data/raw/ipeds/{PULL}/colleges_ipeds_directory.csv"
     assert inputs[directory]["SHA-256"] == hashlib.sha256((project.root / directory).read_bytes()).hexdigest()
     assert any(path.startswith(f"data/raw/usaspending/{PULL}/") for path in inputs)
+    for name in (REPORT, f"review_queue_{PULL}.csv"):
+        assert (project.output / f"{name}.provenance.json").exists()
 
 
 def test_a_malformed_answer_key_host_is_a_structural_break(project):
