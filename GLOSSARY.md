@@ -36,6 +36,14 @@ _Avoid_: Award year, grant year
 The Grants of one Program awarded in one competition.
 _Avoid_: Class, slate (when meaning the Grants rather than the notice)
 
+**No single Host**:
+The outcome for a Grant decided by rule to have no one Host institution (GEAR UP State, a partnership naming no district, a statewide agency, a nonprofit naming no site); distinct from unmatched, where no candidate was found, and from review, where a person must choose.
+_Avoid_: Unmatched (for this case), unknown Host
+
+**Case label**:
+The name of the rule that decided a Grant's Host link (e.g. `uei_confirmed`); accuracy is measured and reported per case label.
+_Avoid_: Confidence, score
+
 ## Grant status
 
 **Funding status**:
