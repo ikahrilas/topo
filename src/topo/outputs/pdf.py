@@ -64,8 +64,11 @@ def _draw(pdf: _Page, body: list[str]) -> None:
                 i += 1
             rows = [_cells(row) for row in block if not set(row.replace("|", "").strip()) <= set("-: ")]
             pdf.set_font(FONT, "", size - 1)
+            columns = len(rows[0])
             with pdf.table(
                 first_row_as_headings=True, line_height=line_h, padding=0.6, text_align="LEFT",
+                col_widths=(2.2, *(1,) * (columns - 1)), align="LEFT",
+                width=pdf.epw if columns > 3 else min(pdf.epw, 40 * (columns + 1.2)),
                 headings_style=FontFace(emphasis="BOLD"),
             ) as grid:
                 for row in rows:
@@ -86,7 +89,7 @@ def _draw(pdf: _Page, body: list[str]) -> None:
             pdf.multi_cell(0, line_h * 1.2, _plain(line[4:]), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         elif line.strip():
             pdf.set_font(FONT, "", size)
-            pdf.multi_cell(0, line_h, _plain(line), markdown=True, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            pdf.multi_cell(0, line_h, _plain(line), markdown=True, align="L", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         else:
             pdf.ln(line_h * 0.4)
         i += 1

@@ -36,6 +36,30 @@ PATTERN = "pattern"
 UNTESTED = "untested"
 CHECKED = "checked"
 BLIND_SPOT = "blind spot"
+FAC = "fac"
+
+
+@dataclass(frozen=True)
+class BacktestScores:
+    """The renewal-timing backtest's scores (#41), when it has been run."""
+
+    as_of_fy: int  # the backtested competition FY, e.g. 2022
+    timing_error_months: float  # mean absolute error of the Predicted due date
+    recall: float
+    precision: float
+    bar: float  # the config bar both rates are held to (0.95)
+
+    @property
+    def meets_bar(self) -> bool:
+        return self.recall >= self.bar and self.precision >= self.bar
+
+
+@dataclass(frozen=True)
+class FacPlausibility:
+    """The FAC plausibility check (#43), when it has been run: Recipients compared and flagged `review`."""
+
+    compared: int
+    review: int
 
 
 @dataclass(frozen=True)
@@ -75,6 +99,8 @@ class OnePagerInputs:
     new_award_months: int = 3  # [target_list] new_award_months
     lead_months: int = 12  # [renewal_timing] lead_months
     reconciliation: pl.DataFrame | None = None  # joined reconciliation table
+    backtest: BacktestScores | None = None  # None until the backtest (#41) feeds it
+    fac: FacPlausibility | None = None  # None until the FAC plausibility check (#43) feeds it
 
 
 @dataclass(frozen=True)
@@ -109,46 +135,66 @@ def money(value: float) -> str:
     return f"{sign}${value / 1e3:,.0f}K"
 
 
+def _untested_item(backtest: BacktestScores | None) -> str:
+    rule = "each is the prior Cohort's published deadline plus 60 months (or a deadline already published)"
+    if backtest is None:
+        return f"Predicted due dates are predictions not yet tested: {rule}, and the rule's backtest has not been scored."
+    verdict = "meeting" if backtest.meets_bar else "below"
+    return (
+        f"Predicted due dates are predictions not yet tested on the coming competitions: {rule}; on the "
+        f"FY{backtest.as_of_fy} backtest the rule scored recall {backtest.recall:.0%} and precision "
+        f"{backtest.precision:.0%}, {verdict} the {backtest.bar:.0%} bar, with a mean timing error of "
+        f"{backtest.timing_error_months:.1f} months."
+    )
+
+
 def _unexplained_item(inputs: OnePagerInputs) -> str:
     """Every unexplained reconciliation row, named in one sentence."""
     table = inputs.reconciliation
-    rows = [] if table is None else table.filter(
+    rows = pl.DataFrame() if table is None else table.filter(
         pl.col("gap_reason_code").is_in([UNEXPLAINED, EXCEEDS_APPROPRIATION_UNEXPLAINED])
-    ).sort("program", "fiscal_year", "check").to_dicts()
+    )
     file = f"reconciliation_{inputs.pull_date.isoformat()}.csv"
-    if not rows:
+    if not rows.height:
         return (f"No reconciliation row is unexplained: against ED's totals and grantee lists every row in {file} "
                 "reconciles, has a stated reason, or could not be compared.")
     named = "; ".join(
-        f"{r['program']} {fy_label(r['fiscal_year'])} {r['check']}"
-        + ("" if r["gap"] is None else f" (gap {money(r['gap'])})")
-        for r in rows
+        f"{program} {check} {', '.join(fy_label(fy) for fy in sorted(fys))}"
+        for program, check, fys in rows.group_by("program", "check").agg("fiscal_year").sort("program", "check").rows()
     )
-    return f"{len(rows)} reconciliation rows are unexplained, with no reason found for the gap ({file}): {named}."
+    rows_are = "row is" if rows.height == 1 else "rows are"
+    return f"{rows.height} reconciliation {rows_are} unexplained, with no reason found for the gap ({file}): {named}."
 
 
 def _trust_items(inputs: OnePagerInputs) -> TrustItems:
     items: list[tuple[str, str]] = []
     if inputs.provisional_fys:
         years = ", ".join(fy_label(fy) for fy in inputs.provisional_fys)
-        awaited = "".join(f" ({program}: {note})" for program, note in sorted(inputs.awaited.items()))
+        by_note: dict[str, list[str]] = {}
+        for program, note in sorted(inputs.awaited.items()):
+            by_note.setdefault(note, []).append(program)
+        awaited = "".join(f", with {note} for {' and '.join(programs)}" for note, programs in by_note.items())
         items.append((PROVISIONAL, (
-            f"{years} is provisional (as of {inputs.pull_date.isoformat()}; reporting lag): USAspending is still "
+            f"{years} {'is' if len(inputs.provisional_fys) == 1 else 'are'} provisional (as of {inputs.pull_date.isoformat()}; reporting lag): USAspending is still "
             f"catching up until {inputs.provisional_lag_days} days after the year ends{awaited}."
         )))
     items.append((PATTERN, (
-        "Funding status is a pattern read from funding actions, never a cause: gaps are routine, a court record "
-        "names only a few Grants, and the counts are not proof of a policy cut."
+        "Funding status is a pattern read from funding actions, never a cause: gaps are routine in normal years and "
+        "court records name only about 11 Grants, so the counts are not proof of a policy cut."
     )))
-    items.append((UNTESTED, (
-        "Predicted due dates are predictions not yet tested: each is the prior Cohort's published deadline plus "
-        "60 months (or a deadline already published), and the rule's backtest has not been scored."
-    )))
+    items.append((UNTESTED, _untested_item(inputs.backtest)))
     items.append((CHECKED, _unexplained_item(inputs)))
     items.append((BLIND_SPOT, (
         "Blind spot: applications that were never funded have no FAIN, so they are not Grants and appear nowhere "
         "here; this covers funded Grants only."
     )))
+    if inputs.fac is not None:
+        fac = inputs.fac
+        items.append((FAC, (
+            f"Federal Audit Clearinghouse (FAC) totals were compared as plausibility, not reconciliation: "
+            f"{fac.review} of {fac.compared} Recipients in both sources have five-year ratios outside 0.5 to 1.5 "
+            "and are marked review, with no pass or fail."
+        )))
     return TrustItems(items)
 
 
@@ -306,6 +352,8 @@ def render_one_pager(inputs: OnePagerInputs) -> str:
         "",
         "---",
         "",
+        f"Sources: USAspending.gov, accessed {inputs.pull_date.isoformat()} (Recipient data include D&B Open Data); "
+        "ED grantee lists and budget tables; IPEDS and CCD via the Urban Institute Education Data Portal (ODC-By).",
         CENSUS_NOTICE,
     ]
     return "\n".join(out) + "\n"

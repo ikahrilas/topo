@@ -6,14 +6,19 @@ window is FY2021-FY2026 and FY2026 (ended 2026-09-30) is still provisional.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 
 import pdfplumber
+import polars as pl
 from support.markdown import prose, sections, table
 from support.curated_totals import allocation, write_curated
 from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
 from support.usaspending import action, write_actions
+
+from topo.fiscal import ReportingWindow
+from topo.outputs.one_pager import BacktestScores, FacPlausibility, OnePagerInputs, render_one_pager
 
 PULL = "2026-10-07"
 MD = f"one_pager_{PULL}.md"
@@ -217,10 +222,56 @@ def test_every_unexplained_reconciliation_row_is_named(project):
     text = one_pager(project)
     [item] = [item for item in trust_items(text) if "unexplained" in item]
     assert item.startswith("2 reconciliation rows are unexplained")
-    assert "Talent Search FY2024 ed_allocation_dollars" in item
-    assert "McNair FY2023 ed_allocation_dollars" in item
-    assert "McNair FY2022" not in item
+    assert "Talent Search ed_allocation_dollars FY2024" in item
+    assert "McNair ed_allocation_dollars FY2023" in item
+    assert "FY2022" not in item
     assert "unexplained" in marked(prose(text, "What's out there"), "checked", text)
+
+
+def test_a_rerun_writes_new_one_pager_files_and_never_overwrites(project):
+    write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 5))
+    project.topo("run", "--as-of", PULL)
+    first = {name: (project.output / name).read_bytes() for name in (MD, PDF)}
+
+    project.topo("run", "--as-of", PULL)
+
+    assert {name: (project.output / name).read_bytes() for name in (MD, PDF)} == first
+    for name in (f"one_pager_{PULL}_v2.md", f"one_pager_{PULL}_v2.pdf"):
+        assert (project.output / name).exists()
+        assert (project.output / f"{name}.provenance.json").exists()
+
+
+def bare_inputs(**extra) -> OnePagerInputs:
+    """Renderer inputs with no Grants: only what a later ticket's hook adds shows up."""
+    return OnePagerInputs(
+        pull_date=dt.date(2026, 10, 7), as_of=dt.date(2026, 10, 7), window=ReportingWindow(2021, 2026),
+        grants=pl.DataFrame(schema={"fain": pl.String, "program": pl.String}),
+        fy_obligations=pl.DataFrame(schema={"fain": pl.String, "fiscal_year": pl.Int64, "obligation": pl.Float64}),
+        **extra,
+    )
+
+
+def test_without_backtest_scores_or_a_fac_check_the_one_pager_says_neither_has_run():
+    items = trust_items(render_one_pager(bare_inputs()))
+
+    [untested] = [item for item in items if "not yet tested" in item]
+    assert "backtest has not been scored" in untested
+    assert not [item for item in items if "FAC" in item]
+
+
+def test_backtest_scores_and_fac_plausibility_are_picked_up_when_later_tickets_supply_them():
+    text = render_one_pager(bare_inputs(
+        backtest=BacktestScores(as_of_fy=2022, timing_error_months=0.4, recall=0.97, precision=0.92, bar=0.95),
+        fac=FacPlausibility(compared=120, review=7),
+    ))
+
+    items = trust_items(text)
+    assert len(items) <= 8
+    [untested] = [item for item in items if "not yet tested" in item]
+    assert "FY2022 backtest" in untested and "recall 97%" in untested and "precision 92%" in untested
+    assert "below the 95% bar" in untested
+    [fac] = [item for item in items if "FAC" in item]
+    assert "7 of 120" in fac and "plausibility, not reconciliation" in fac
 
 
 def test_with_no_unexplained_rows_the_trust_item_says_none_are(project):
