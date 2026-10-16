@@ -25,6 +25,12 @@ from topo.domain.grant_universe import (
     build_lookback,
 )
 from topo.domain.host_linking import HostLookups, build_host_links
+from topo.domain.renewal_timing import (
+    RenewalSettings,
+    predict_cohort_timing,
+    read_deadline_table,
+    read_renewal_timing,
+)
 from topo.domain.succession import (
     LookbackSettings,
     build_successions,
@@ -53,6 +59,11 @@ COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date,
 GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
 SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
 HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
+# Renewal timing (#40).
+COHORT_TIMING = "cohort_timing"  # (Program, Cohort FY): observed gap, Predicted due date, evidence tier
+RENEWAL_TIMING = "renewal_timing"  # one row per FAIN: Cohort timing, Re-competing soon, GEAR UP end-date fact
+RENEWAL_TIMING_EXCEPTIONS = "renewal_timing_exceptions"  # Budget-period ends that disagree with the Cohort
+DEADLINES = "deadlines"  # the curated deadline table, recorded as an input for provenance sidecars
 
 
 @dataclass(frozen=True)
@@ -122,6 +133,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     successors = _join_succession(config, universe, actions, host_links, lookups)
     _join_funding_status(config, universe, context, successors)
+    _join_renewal_timing(config, universe, context)
     _join_ed_lists(config, universe, actions, pull_date)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
@@ -184,6 +196,37 @@ def _join_funding_status(
     periods.write_parquet(config.layout.joined_table(FUNDING_STATUS))
     per_grant.write_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     append_funding_status_history(periods, config.layout.output, context.as_of, context.pull_date)
+
+
+def _join_renewal_timing(config: Config, universe: GrantUniverse, context: RunContext) -> None:
+    """Predicted due dates per Program Cohort and Re-competing soon per Grant (joined layer)."""
+    settings = RenewalSettings.from_config(config)
+    path = config.layout.curated / settings.deadline_table
+    deadline_hash = provenance.record_raw_inputs(config, DEADLINES, [path] if path.exists() else [])
+    cohort_timing = predict_cohort_timing(
+        pl.read_parquet(config.layout.joined_table(COHORT_STARTS)), read_deadline_table(path), settings
+    )
+    windows = ReadWindows.from_config(config)
+    timing, exceptions = read_renewal_timing(
+        universe.grants, universe.grant_actions, pl.read_parquet(config.layout.joined_table(GRANT_COHORTS)),
+        cohort_timing, pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS)), context.as_of,
+        settings, dict(windows.budget_periods),
+    )
+    run_log.record(
+        config, layer="join", source=RENEWAL_TIMING, rows_in=universe.grants.height, rows_out=timing.height,
+        drops={}, pull_date=context.pull_date,
+        input_hash=provenance.combined_hash([
+            deadline_hash,
+            *(provenance.file_sha256(config.layout.joined_table(name))
+              for name in (COHORT_STARTS, GRANT_COHORTS, GRANT_FUNDING_STATUS)),
+        ]),
+    )
+    if exceptions.height:
+        warn(f"{exceptions.height} Grants have Budget-period ends that disagree with their Cohort "
+             f"({RENEWAL_TIMING_EXCEPTIONS})")
+    cohort_timing.write_parquet(config.layout.joined_table(COHORT_TIMING))
+    timing.write_parquet(config.layout.joined_table(RENEWAL_TIMING))
+    exceptions.write_parquet(config.layout.joined_table(RENEWAL_TIMING_EXCEPTIONS))
 
 
 def _join_ed_lists(config: Config, universe: GrantUniverse, actions: pl.DataFrame, pull_date: dt.date) -> None:
@@ -250,13 +293,14 @@ def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
-    rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
+    timing = pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING))
+    rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding, timing=timing)
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, RENEWAL_TIMING)
         ),
     )
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)

@@ -32,6 +32,15 @@ FUNDING_COLUMNS = {  # joined grant_funding_status column -> display column
     "disruption": "2025–26 disruption",
 }
 
+TIMING_COLUMNS = {  # joined renewal_timing column -> display column (#40)
+    "re_competing_soon": "Re-competing soon",
+    "predicted_due_date": "Predicted due date",
+    "evidence_tier": "Evidence tier",
+    "predicted_competition_fy": "Predicted competition FY",
+    "timing": "Renewal timing",
+    "end_date_fact": "End date",
+}
+
 
 def build_target_list(
     universe: GrantUniverse,
@@ -39,15 +48,31 @@ def build_target_list(
     *,
     host_links: pl.DataFrame,
     funding: pl.DataFrame | None = None,
+    timing: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """The target-list rows, in display column order.
 
     `host_links` is the joined Host-links table (topo.domain.host_linking.HostLinks),
     one row per FAIN; the Host sits next to the Recipient name and UEI.
     `funding` is the joined grant_funding_status table (one row per FAIN).
+    `timing` is the joined renewal_timing table (one row per FAIN).
     """
     if funding is None:
         funding = pl.DataFrame(schema={"fain": pl.String, **{c: pl.String for c in FUNDING_COLUMNS}})
+    if timing is None:
+        timing = pl.DataFrame(schema={"fain": pl.String, "re_competing_soon": pl.Boolean,
+                                      "predicted_due_date": pl.Date, "evidence_tier": pl.String,
+                                      "predicted_competition_fy": pl.Int64, "timing": pl.String,
+                                      "end_date_fact": pl.String})
+    timing = timing.select(
+        "fain",
+        pl.when(pl.col("re_competing_soon")).then(pl.lit("yes")).otherwise(pl.lit("no")).alias("re_competing_soon"),
+        "predicted_due_date",
+        "evidence_tier",
+        pl.concat_str(pl.lit("FY"), pl.col("predicted_competition_fy").cast(pl.String)).alias("predicted_competition_fy"),
+        "timing",
+        "end_date_fact",
+    )
     window = universe.window
     labels = [fy_label(fy) for fy in window.fiscal_years]
     amounts = universe.fy_obligations.with_columns(
@@ -87,6 +112,7 @@ def build_target_list(
         .join(latest, on="fain", how="left")
         .join(wide.select("fain", *labels), on="fain", how="left")
         .join(funding.select("fain", *FUNDING_COLUMNS), on="fain", how="left")
+        .join(timing, on="fain", how="left")
         .with_columns(pl.col(labels).fill_null(0.0), pl.col("Cumulative obligation").fill_null(0.0))
         .sort("recipient_state", "program", "fain", nulls_last=True)
         .select(
@@ -106,6 +132,7 @@ def build_target_list(
             "Cumulative obligation",
             *labels,
             *(pl.col(src).alias(shown) for src, shown in FUNDING_COLUMNS.items()),
+            *(pl.col(src).alias(shown) for src, shown in TIMING_COLUMNS.items()),
             pl.col("pull_date").alias("Pull date"),
             pl.lit(as_of).alias("As-of date"),
         )

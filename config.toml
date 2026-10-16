@@ -90,3 +90,15 @@ directory_from_year = 2015
 # supervisory union, 4 regional education service agency, 5 state agency,
 # 7 independent charter agency (the host-linking prototype's set).
 agency_types = [1, 2, 4, 5, 7]
+
+[renewal_timing]
+# Renewal timing (#40). The Predicted due date of a Program's next competition is
+# the prior Cohort's published deadline (data/curated/<deadline_table>, each row
+# cited) plus `cycle_months`. A Program whose observed gap between Cohort starts
+# isn't `cycle_months` is marked "timing not predicted".
+cycle_months = 60
+# Re-competing soon: the Predicted due date is at most this many months after the
+# As-of date (and the latest readable Funding status is continued or funded late).
+# ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
+lead_months = 12
+deadline_table = "deadlines.csv"
