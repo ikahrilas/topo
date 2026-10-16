@@ -41,6 +41,29 @@ enrollment_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_fall-
 # Directory years kept: names since 2015 cover former names; UEIs start in 2022.
 directory_from_year = 2015
 
+[funding_status]
+# Funding status read windows (ADR 0001, docs/research/status-signals-2025-26.md §4).
+# A Budget period's anniversary is its start date. Its first positive obligation
+# dated up to `continued_after_months` after the anniversary reads "continued";
+# later reads "funded late". With none, the period reads "unfunded" from
+# `unfunded_after_days` after the anniversary and "not yet readable" before that.
+# An action with no usable Budget period is attributed to the period whose
+# window (anniversary - `continued_before_months` .. + `continued_after_months`)
+# holds its action date; a period appears once that window opens.
+continued_before_months = 4
+continued_after_months = 1
+unfunded_after_days = 90
+# The 2025–26 disruption window: Budget periods starting on or between these dates.
+disruption_window_start = 2025-05-01
+disruption_window_end = 2026-09-30
+
+[funding_status.budget_periods]
+# ASSUMPTION: Budget periods in a full project period, by Program family. A Grant
+# is expected to run this many periods (or more, when it was funded for more).
+# Erring short avoids calling a planned final year "unfunded".
+TRIO = 5
+"GEAR UP" = 6
+
 [ccd]
 # Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
 # fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.
