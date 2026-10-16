@@ -100,6 +100,28 @@ def test_re_competing_soon_is_gated_by_funding_status(project, funded_years, lat
     assert ub["Renewal timing"] == "predicted"
 
 
+def test_tier_2_rows_show_the_predicted_due_date_and_re_competing_soon_is_the_second_label(project):
+    write_deadlines(project, UB_FY2022)
+    write_actions(project.raw_usaspending, PULL, [
+        *UB_COHORTS,
+        *grant("P047A220001", 2022, 5),  # in its final Budget period, re-competing soon
+        *grant("P047A220002", 2022, 3),  # unfunded: Unfunded outranks Re-competing soon
+        *grant("P042A230003", 2023, 4),  # SSS, no deadline: continuing
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    rows = project.read_csv(f"target_list_{PULL}.csv")
+    shown = [(r["FAIN"], r["Priority tier"], r["Label"], r["Lifecycle stage"]) for r in rows]
+    assert shown == [
+        ("P047A220001", "2", "Re-competing soon", "final budget period"),
+        ("P042A230003", "3", "Continuing", "continuing"),
+        ("P047A220002", "4", "Unfunded (not yet readable; readable from 2026-11-30)", "final budget period"),
+    ]
+    tier_2 = rows[0]
+    assert (tier_2["Predicted due date"], tier_2["Evidence tier"]) == ("2027-01-31", "inferred")
+
+
 def test_a_due_date_more_than_12_months_away_is_not_re_competing_soon(project):
     write_deadlines(project, UB_FY2022)
     write_actions(project.raw_usaspending, PULL, [*UB_COHORTS, *grant("P047A220001", 2022, 5)])

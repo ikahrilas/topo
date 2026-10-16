@@ -81,7 +81,13 @@ GLOSSARY = (
               "readable."),
     ("Priority tier", "Call-order bucket, not a score: 1 new within {months} months of the award; 2 re-competing "
                       "soon; 3 continuing; 4 unfunded or reversed (with its reason; not a call list)."),
-    ("Cause note", "Shown only where a cited public source names the Grant's FAIN."),
+    ("Predicted due date", "The expected application deadline of the Program's next competition: the prior "
+                           "Cohort's published deadline plus 60 months (a prediction not yet tested). Evidence "
+                           "tier: notice published or inferred. \"date unknown\" when no deadline is on file; "
+                           "\"timing not predicted\" when the Program's cycle isn't 60 months, and for GEAR UP."),
+    ("End date", "GEAR UP only: the Grant's expected end, when it falls within the lead time. An end date, "
+                 "not a due date."),
+    ("Cause note","Shown only where a cited public source names the Grant's FAIN."),
     ("Pull date", "The date the source data was fetched."),
     ("As-of date", "The date the data is read as of; Funding status is judged against it."),
 )
