@@ -177,6 +177,72 @@ def test_a_pinned_answer_key_that_changed_stops_the_run(project):
     assert "frozen answer key" in result.output
 
 
+def test_overrides_win_after_the_rules_and_survive_reruns(project):
+    setup(project)
+    write_answer_key(project.root, gating_key())  # demotes uei_confirmed to review
+    write_overrides(project.root, [
+        override_row("P042A250022", "UNITID 174066", date="2026-09-01", note="first look"),
+        override_row("P042A250022", "UNITID 174233", date="2026-10-01", note="desc names Duluth"),
+        override_row("P042A250001", f"UNITID {unitid(1)}", note="confirmed by phone"),
+        override_row("P044A250012", "no single Host"),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+    project.topo("run", "--as-of", PULL)  # a rerun applies the same overrides
+
+    for name in (f"target_list_{PULL}.csv", f"target_list_{PULL}_v2.csv"):
+        targets = by(project.read_csv(name), "FAIN")
+        got = {f: (targets[f]["Host institution"], targets[f]["Host ID"], targets[f]["Host confidence"],
+                   targets[f]["Case label"]) for f in ("P042A250022", "P042A250001", "P042A250023", "P042A250002")}
+        assert got == {
+            "P042A250022": ("University of Minnesota-Duluth", "UNITID 174233", "matched", "override"),
+            "P042A250001": ("College Number 1", f"UNITID {unitid(1)}", "matched", "override"),
+            "P042A250023": ("", "", "in review", "system_campus_not_stated"),  # unreviewed: stays review
+            "P042A250002": ("College Number 2", f"UNITID {unitid(2)}", "in review", "uei_confirmed"),  # demoted
+        }
+        assert targets["P044A250012"]["Case label"] == "override"
+
+    # Accuracy is measured on the rules' own decisions, never on overrides.
+    assert accuracy(project, f"match_quality_{PULL}_v2.md")["uei_confirmed"]["Correct"] == "9"
+    overrides = by(table((project.output / REPORT).read_text(), "Overrides"), "FAIN")
+    assert overrides["P042A250022"]["Host"] == "UNITID 174233"
+    assert overrides["P042A250022"]["Rule case label"] == "system_campus_not_stated"
+
+
+def test_review_queue_lists_candidates_with_signals_by_dollars_and_succession_impact(project):
+    setup(project, [
+        *GRANTS,
+        # A Minnesota Upward Bound Grant at the same dollars as the Wisconsin SSS one. The Wisconsin
+        # Recipient holds two other SSS Grants (already reviewed), so its Host matters more to Successions.
+        one_year("P047A250025", "REGENTS OF THE UNIVERSITY OF MINNESOTA", "UMNUEI000001", "MN", IHE, amount=200000),
+        one_year("P042A200026", "UNIVERSITY OF WISCONSIN SYSTEM", "UWSUEI000001", "WI", IHE, amount=500000),
+        one_year("P042A150027", "UNIVERSITY OF WISCONSIN SYSTEM", "UWSUEI000001", "WI", IHE, amount=500000),
+    ])
+    write_overrides(project.root, [
+        override_row(fain, host) for fain, host in [
+            ("P042A250001", f"UNITID {unitid(1)}"), ("P042A200026", "UNITID 240444"), ("P042A150027", "UNITID 240444"),
+        ]
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    queue = project.read_csv(f"review_queue_{PULL}.csv")
+    order = list(dict.fromkeys(r["FAIN"] for r in queue))
+    assert order[:2] == ["P042A250022", "P042A250023"]  # $900k first; then $200k with Succession impact 2
+    assert order == ["P042A250022", "P042A250023", "P047A250025"]
+    # Reviewed (overridden) Grants such as P042A250001 and P042A200026 have left the queue.
+    minnesota = [r for r in queue if r["FAIN"] == "P042A250022"]
+    assert [(r["Candidate host ID"], r["Candidate host"], r["Signals"]) for r in minnesota] == [
+        ("UNITID 174066", "University of Minnesota-Twin Cities", "uei"),
+        ("UNITID 174233", "University of Minnesota-Duluth", "uei"),
+    ]
+    assert {(r["Priority"], r["Case label"], float(r["Dollars"])) for r in minnesota} == {
+        ("1", "system_campus_not_stated", 900000.0),
+    }
+    wisconsin = next(r for r in queue if r["FAIN"] == "P042A250023")
+    assert wisconsin["Succession impact"] == "2"
+
+
 def test_a_malformed_answer_key_host_is_a_structural_break(project):
     setup(project)
     write_answer_key(project.root, [key_row("P044A250011", "Rocky Mountain College")])
