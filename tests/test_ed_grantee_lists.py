@@ -166,3 +166,24 @@ def test_the_committed_manifest_records_the_11_known_gaps():
     gaps = sorted((r.program, r.fy) for r in manifest if r.status == "missing")
     assert len(gaps) == 11
     assert ("ub_84047A", "2021") in gaps and ("mcnair_84217A", "2022") in gaps
+
+
+def test_gear_up_pages_give_new_awards_per_fy_and_years_without_a_table_are_missing(project):
+    lists = raw_dir(project)
+    page = gearup_html_bytes({
+        2025: [("Washington State University", "WA", "2,738", "$2,190,400"),
+               ("Utah State University", "UT", "2,316", "$1,852,798")],
+        2023: [("Weld County School District 6&nbsp;", "CO", "1,899&nbsp;", "$1,191,076")],
+    })
+    write_manifest(lists, [file_list(lists, "gearup_partnership_84334A", "2023-2025", "awards.html", page)])
+
+    project.topo("clean", "ed_grantee_lists")
+
+    rows = cleaned(project, "ed_gearup_list_rows").sort("fiscal_year", "grantee")
+    assert rows.select("program", "fiscal_year", "grantee", "state", "students", "ed_amount").rows() == [
+        ("GEAR UP partnership", 2023, "Weld County School District 6", "CO", 1899, 1191076.0),
+        ("GEAR UP partnership", 2025, "Utah State University", "UT", 2316, 1852798.0),
+        ("GEAR UP partnership", 2025, "Washington State University", "WA", 2738, 2190400.0),
+    ]
+    coverage = cleaned(project, "ed_list_coverage").sort("fiscal_year")
+    assert coverage.select("fiscal_year", "status").rows() == [(2023, "ok"), (2024, "missing"), (2025, "ok")]

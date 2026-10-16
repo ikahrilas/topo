@@ -23,6 +23,7 @@ import datetime as dt
 import hashlib
 import re
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 
 import openpyxl
@@ -31,7 +32,7 @@ import pdfplumber
 import polars as pl
 
 from topo.config import Config, Layout
-from topo.domain.programs import PROGRAMS, Program
+from topo.domain.programs import PROGRAMS, TRIO, Program
 from topo.guards import StructuralBreak, check_schema, check_unique
 
 SOURCE = "ed_grantee_lists"
@@ -75,6 +76,24 @@ class EdTrioListRows(pa.DataFrameModel):
     raw_file: str
     sha256: str
     filed_date: dt.date  # the manifest's Pull date (hand-download date)
+
+    class Config:
+        strict = True
+
+
+class EdGearUpListRows(pa.DataFrameModel):
+    """One GEAR UP new award on ED's "Grant Awards" page for one FY (no FAIN on the page)."""
+
+    list_row_id: str = pa.Field(unique=True)
+    program: str
+    fiscal_year: int = pa.Field(ge=2000)
+    grantee: str
+    state: str = pa.Field(str_matches=r"^[A-Z]{2}$")
+    students: int = pa.Field(nullable=True, ge=0)  # Year 1 proposed students served
+    ed_amount: float = pa.Field(ge=0)  # Year 1 budget; reconciliation only
+    raw_file: str
+    sha256: str
+    filed_date: dt.date
 
     class Config:
         strict = True
@@ -294,6 +313,96 @@ def _trio_rows(layout: Layout, row: ManifestRow) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------- GEAR UP lists
+
+
+class _AwardTables(HTMLParser):
+    """Collects table rows (cell texts) under each `id="fy-YYYY"` section of a saved ed.gov page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.fy: int | None = None
+        self.rows: list[tuple[int, list[str]]] = []
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._header_row = False
+
+    def handle_starttag(self, tag, attrs):
+        section = re.fullmatch(r"fy-(\d{4})", dict(attrs).get("id") or "")
+        if section:
+            self.fy = int(section[1])
+        elif tag == "tr":
+            self._row, self._header_row = [], False
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+            self._header_row |= tag == "th"
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cell is not None and self._row is not None:
+            self._row.append(re.sub(r"\s+", " ", "".join(self._cell).replace("\xa0", " ")).strip())
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            if self.fy is not None and not self._header_row:
+                self.rows.append((self.fy, self._row))
+            self._row = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+def parse_gearup_page(html: str, label: str) -> list[dict]:
+    """New-award rows (grantee, state, Year 1 students, Year 1 budget) per FY section.
+
+    Some sections write their header row with <td> cells; a row whose State cell reads "State" is skipped.
+    """
+    parser = _AwardTables()
+    parser.feed(html)
+    rows = []
+    for fy, cells in parser.rows:
+        if len(cells) != 4:
+            raise StructuralBreak(f"{label}: FY{fy} row with {len(cells)} cells: {cells!r}")
+        grantee, state, students, budget = cells
+        if state.strip().lower() == "state":
+            continue  # a header row written with <td> cells
+        if not re.fullmatch(r"\$?\s*\d[\d,]*", budget):
+            raise StructuralBreak(f"{label}: FY{fy} row with unreadable budget: {cells!r}")
+        rows.append(
+            {
+                "fiscal_year": fy,
+                "grantee": grantee,
+                "state": state,
+                "students": _number(students) if re.search(r"\d", students) else None,
+                "ed_amount": float(_number(budget)),
+            }
+        )
+    return rows
+
+
+def _gearup_rows(layout: Layout, row: ManifestRow) -> list[dict]:
+    data = verified_bytes(layout, row)
+    sha256 = hashlib.sha256(data).hexdigest()
+    program = program_of(row.program)
+    in_range = set(row.fiscal_years)
+    parsed = [r for r in parse_gearup_page(data.decode("utf-8", errors="replace"), row.stored_name)
+              if r["fiscal_year"] in in_range]
+    numbers: dict[int, int] = {}
+    out = []
+    for rec in parsed:
+        number = numbers[rec["fiscal_year"]] = numbers.get(rec["fiscal_year"], 0) + 1
+        out.append(
+            {
+                "list_row_id": f"{row.program}:FY{rec['fiscal_year']}:{number}",
+                "program": program.name,
+                **rec,
+                "raw_file": row.stored_name,
+                "sha256": sha256,
+                "filed_date": row.pull_date,
+            }
+        )
+    return out
+
+
 # --------------------------------------------------------------------- clean
 
 
@@ -314,23 +423,35 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     manifest = read_manifest(path) if path.exists() else []
 
     trio: list[dict] = []
+    gearup: list[dict] = []
     coverage: list[dict] = []
     for row in manifest:
         program = program_of(row.program)
+        status = {fy: (row.status, row.note) for fy in row.fiscal_years}
+        if row.status == FILED and program.family == TRIO:
+            trio.extend(_trio_rows(layout, row))
+        elif row.status == FILED:
+            new_awards = _gearup_rows(layout, row)
+            gearup.extend(new_awards)
+            tabled = {r["fiscal_year"] for r in new_awards}
+            for fy in status:
+                if fy not in tabled:
+                    status[fy] = (MISSING, f"no FY{fy} table on the filed page")
         coverage.extend(
             {
                 "manifest_program": row.program,
                 "program": program.name,
                 "fiscal_year": fy,
-                "status": row.status,
-                "note": row.note,
+                "status": fy_status,
+                "note": note,
                 "raw_file": row.stored_name or None,
                 "filed_date": row.pull_date,
             }
-            for fy in row.fiscal_years
+            for fy, (fy_status, note) in status.items()
         )
-        if row.status == FILED and program.family == "TRIO":
-            trio.extend(_trio_rows(layout, row))
+
+    gearup_rows = _frame(EdGearUpListRows, gearup).sort("program", "fiscal_year", "list_row_id")
+    gearup_rows = check_schema(EdGearUpListRows, gearup_rows, "ED GEAR UP grantee lists")
 
     trio_rows = _frame(EdTrioListRows, trio).sort("program", "fiscal_year", "fain")
     check_unique(trio_rows, ["program", "fiscal_year", "fain"], "ED TRIO grantee lists")
@@ -342,5 +463,6 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
 
     layout.cleaned.mkdir(parents=True, exist_ok=True)
     trio_rows.write_parquet(layout.cleaned_table(TRIO_TABLE))
+    gearup_rows.write_parquet(layout.cleaned_table(GEARUP_TABLE))
     list_coverage.write_parquet(layout.cleaned_table(COVERAGE_TABLE))
     return trio_rows
