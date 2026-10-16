@@ -73,7 +73,7 @@ class ManifestRows(pa.DataFrameModel):
 
 
 class ManifestEntry(Protocol):
-    """What a source's `pull` returns per fetched file (e.g. usaspending.PulledFile)."""
+    """What a source's `pull` returns per fetched file (topo.sources.raw.PulledFile)."""
 
     source: str
     request: str

@@ -24,7 +24,6 @@ Without any geocoder pull, `clean` is a no-op. No API key is needed.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import time
 import urllib.request
@@ -35,11 +34,12 @@ import pandera.polars as pa
 import polars as pl
 
 from topo import provenance, run_log
-from topo.config import Config, Layout
+from topo.config import Config
 from topo.domain.host_linking import MATCHED, UNITID
 from topo.guards import StructuralBreak, check_schema, check_unique
 from topo.sources import edge, ipeds
-from topo.sources.usaspending import PulledFile
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile
 
 SOURCE = "census_geocoder"
 TABLE = "census_geocoder_campus_districts"
@@ -72,19 +72,6 @@ class CensusGeocoderCampusDistricts(pa.DataFrameModel):
     class Config:
         strict = True
         unique = ["unitid", "leaid"]
-
-
-def pull_dates(layout: Layout) -> list[dt.date]:
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        try:
-            found.append(dt.date.fromisoformat(child.name))
-        except ValueError:
-            continue
-    return sorted(found)
 
 
 GetJson = Callable[[str], dict]
@@ -128,18 +115,12 @@ def pull(
         })
         url = f"{settings['url']}?{query}"
         lookups.append({"unitid": host["unitid"], "request": url, "response": get_json(url)})
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
+    folder = raw_tree.pull_folder(config.layout, SOURCE, pull_date)
     folder.mkdir(parents=True, exist_ok=True)
     dest = folder / RAW_FILE
-    data = json.dumps(lookups, indent=1).encode()
-    dest.write_bytes(data)
-    return [
-        PulledFile(
-            source=SOURCE, request=f"GET {settings['url']} x{len(lookups)} (one per college Host with no EDGE point)",
-            url=settings["url"], path=dest, pull_date=pull_date, bytes=len(data),
-            sha256=hashlib.sha256(data).hexdigest(), licence_citation=LICENCE_CITATION,
-        )
-    ]
+    dest.write_bytes(json.dumps(lookups, indent=1).encode())
+    request = f"GET {settings['url']} x{len(lookups)} (one per college Host with no EDGE point)"
+    return [raw_tree.described(SOURCE, request, settings["url"], dest, pull_date, LICENCE_CITATION)]
 
 
 def clean_lookups(lookups: list[dict], *, year: str, raw_file: str, pull_date: dt.date) -> pl.DataFrame:
@@ -165,14 +146,10 @@ def clean_lookups(lookups: list[dict], *, year: str, raw_file: str, pull_date: d
 def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one geocoder pull (default: the latest). No pull at all: no-op, empty frame."""
     layout = config.layout
+    pull_date = pull_date or raw_tree.latest_pull_date(layout, SOURCE)
     if pull_date is None:
-        dates = pull_dates(layout)
-        if not dates:
-            return _empty()
-        pull_date = dates[-1]
-    path = layout.raw_source(SOURCE) / pull_date.isoformat() / RAW_FILE
-    if not path.exists():
-        raise StructuralBreak(f"Census geocoder pull lacks {RAW_FILE} ({path.parent})")
+        return _empty()
+    [path] = raw_tree.pulled_paths(layout, SOURCE, pull_date, [RAW_FILE], "Census geocoder")
     lookups = json.loads(path.read_text())
     settings = config.section(SOURCE)
     input_hash = provenance.record_raw_inputs(config, SOURCE, [path])

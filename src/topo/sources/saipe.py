@@ -20,20 +20,16 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
-import hashlib
 import io
-import urllib.request
-from collections.abc import Callable
-from pathlib import Path
-from urllib.parse import urlparse
 
 import pandera.polars as pa
 import polars as pl
 
 from topo import provenance, run_log
-from topo.config import Config, Layout
+from topo.config import Config
 from topo.guards import StructuralBreak, check_schema, check_unique
-from topo.sources.usaspending import PulledFile
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile
 
 SOURCE = "saipe"
 TABLE = "saipe_school_districts"
@@ -71,46 +67,10 @@ class SaipeSchoolDistricts(pa.DataFrameModel):
         unique = ["leaid"]
 
 
-def pull_dates(layout: Layout) -> list[dt.date]:
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        try:
-            found.append(dt.date.fromisoformat(child.name))
-        except ValueError:
-            continue
-    return sorted(found)
-
-
-def _file_name(url: str) -> str:
-    return Path(urlparse(url).path).name
-
-
-Download = Callable[[str, Path], None]
-
-
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url, timeout=600) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-
-
-def pull(config: Config, pull_date: dt.date, *, download: Download = _download) -> list[PulledFile]:
+def pull(config: Config, pull_date: dt.date, *, download: raw_tree.Download = raw_tree.download) -> list[PulledFile]:
     """Fetch the configured SAIPE school-district file (one request) into data/raw/saipe/<Pull date>/."""
     url = config.section(SOURCE)["school_districts_url"]
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
-    folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / _file_name(url)
-    download(url, dest)
-    data = dest.read_bytes()
-    return [
-        PulledFile(
-            source=SOURCE, request=f"GET {url}", url=url, path=dest, pull_date=pull_date,
-            bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), licence_citation=LICENCE_CITATION,
-        )
-    ]
+    return raw_tree.fetch(config.layout, SOURCE, pull_date, [url], download, LICENCE_CITATION)
 
 
 def _raw_rows(text: str, raw_file: str) -> pl.DataFrame:
@@ -165,16 +125,12 @@ def clean_school_districts(raw: pl.DataFrame, *, data_year: int, raw_file: str, 
 def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one SAIPE pull (default: the latest). No pull at all: no-op, empty frame."""
     layout = config.layout
+    pull_date = pull_date or raw_tree.latest_pull_date(layout, SOURCE)
     if pull_date is None:
-        dates = pull_dates(layout)
-        if not dates:
-            return _empty()
-        pull_date = dates[-1]
+        return _empty()
     settings = config.section(SOURCE)
-    name = _file_name(settings["school_districts_url"])
-    path = layout.raw_source(SOURCE) / pull_date.isoformat() / name
-    if not path.exists():
-        raise StructuralBreak(f"SAIPE pull lacks {name} ({path.parent})")
+    name = raw_tree.file_name(settings["school_districts_url"])
+    [path] = raw_tree.pulled_paths(layout, SOURCE, pull_date, [name], "SAIPE")
     raw = _raw_rows(path.read_text(encoding="utf-8-sig", errors="replace"), name)
     input_hash = provenance.record_raw_inputs(config, SOURCE, [path])
     districts = clean_school_districts(raw, data_year=int(settings["data_year"]), raw_file=name, pull_date=pull_date)

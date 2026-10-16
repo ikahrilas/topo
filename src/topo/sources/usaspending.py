@@ -12,14 +12,12 @@ they can't reach any later layer.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
 import tempfile
 import urllib.request
 import zipfile
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 import pandera.polars as pa
@@ -30,6 +28,8 @@ from topo.config import Config, Layout
 from topo.domain.programs import LISTINGS
 from topo.fiscal import fiscal_year
 from topo.guards import StructuralBreak, check_schema, check_unique
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile  # noqa: F401  (re-exported: sources' pull results)
 
 SOURCE = "usaspending"
 CLEANED_TABLE = "usaspending_actions"
@@ -109,47 +109,18 @@ class UsaspendingActions(pa.DataFrameModel):
 # ---------------------------------------------------------------- pull dates
 
 
-def pull_dates(layout: Layout) -> list[dt.date]:
-    """Pull dates present in the raw tree, oldest first."""
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        if child.is_dir():
-            try:
-                found.append(dt.date.fromisoformat(child.name))
-            except ValueError:
-                continue
-    return sorted(found)
-
-
 def latest_pull_date(layout: Layout) -> dt.date:
-    dates = pull_dates(layout)
-    if not dates:
+    """The latest USAspending Pull date; the pipeline cannot run without one."""
+    latest = raw_tree.latest_pull_date(layout, SOURCE)
+    if latest is None:
         raise StructuralBreak(f"no USAspending pull found under {layout.raw_source(SOURCE)}")
-    return dates[-1]
+    return latest
 
 
 # ---------------------------------------------------------------------- pull
 
 
-@dataclass(frozen=True)
-class PulledFile:
-    """One fetched raw file, with what a manifest row needs."""
-
-    source: str
-    request: str
-    url: str
-    path: Path
-    pull_date: dt.date
-    bytes: int
-    sha256: str
-    licence_citation: str = LICENCE_CITATION
-
-
 PostJson = Callable[[str, dict], dict]
-Download = Callable[[str, Path], None]
 
 
 def _post_json(url: str, payload: dict) -> dict:
@@ -160,18 +131,12 @@ def _post_json(url: str, payload: dict) -> dict:
         return json.load(response)
 
 
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url, timeout=600) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-
-
 def pull(
     config: Config,
     pull_date: dt.date,
     *,
     post_json: PostJson = _post_json,
-    download: Download = _download,
+    download: raw_tree.Download = raw_tree.download,
 ) -> list[PulledFile]:
     """Fetch the monthly Full assistance archive per configured agency and fiscal year.
 
@@ -179,7 +144,7 @@ def pull(
     Files are fetched serially (polite to the API host).
     """
     settings = config.section(SOURCE)
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
+    folder = raw_tree.pull_folder(config.layout, SOURCE, pull_date)
     folder.mkdir(parents=True, exist_ok=True)
     pulled: list[PulledFile] = []
     for agency in settings["archive_agencies"]:
@@ -192,18 +157,8 @@ def pull(
                     continue
                 dest = folder / entry["file_name"]
                 download(entry["url"], dest)
-                data = dest.read_bytes()
-                pulled.append(
-                    PulledFile(
-                        source=SOURCE,
-                        request=f"POST {listing_url} {json.dumps(payload, sort_keys=True)}",
-                        url=entry["url"],
-                        path=dest,
-                        pull_date=pull_date,
-                        bytes=len(data),
-                        sha256=hashlib.sha256(data).hexdigest(),
-                    )
-                )
+                request = f"POST {listing_url} {json.dumps(payload, sort_keys=True)}"
+                pulled.append(raw_tree.described(SOURCE, request, entry["url"], dest, pull_date, LICENCE_CITATION))
     return pulled
 
 
@@ -211,7 +166,7 @@ def pull(
 
 
 def raw_files(layout: Layout, pull_date: dt.date) -> list[Path]:
-    folder = layout.raw_source(SOURCE) / pull_date.isoformat()
+    folder = raw_tree.pull_folder(layout, SOURCE, pull_date)
     return sorted(p for p in folder.iterdir() if p.suffix.lower() in {".csv", ".zip"})
 
 

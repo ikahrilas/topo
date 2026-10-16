@@ -19,19 +19,15 @@ directory and colleges come out `unmatched`, still visible on the target list.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import urllib.request
-from collections.abc import Callable
-from pathlib import Path
-from urllib.parse import urlparse
 
 import pandera.polars as pa
 import polars as pl
 
 from topo import provenance, run_log
-from topo.config import Config, Layout
+from topo.config import Config
 from topo.guards import StructuralBreak, check_schema, check_unique
-from topo.sources.usaspending import PulledFile
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile
 
 SOURCE = "ipeds"
 DIRECTORY_TABLE = "ipeds_directory"
@@ -94,23 +90,6 @@ class IpedsEnrollment(pa.DataFrameModel):
 # ---------------------------------------------------------------- pull dates
 
 
-def pull_dates(layout: Layout) -> list[dt.date]:
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        try:
-            found.append(dt.date.fromisoformat(child.name))
-        except ValueError:
-            continue
-    return sorted(found)
-
-
-def _file_name(url: str) -> str:
-    return Path(urlparse(url).path).name
-
-
 def _urls(config: Config) -> dict[str, str]:
     settings = config.section(SOURCE)
     return {"directory": settings["directory_url"], "enrollment": settings["enrollment_url"]}
@@ -118,35 +97,13 @@ def _urls(config: Config) -> dict[str, str]:
 
 # ---------------------------------------------------------------------- pull
 
-Download = Callable[[str, Path], None]
 
-
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url, timeout=600) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-
-
-def pull(config: Config, pull_date: dt.date, *, download: Download = _download) -> list[PulledFile]:
+def pull(config: Config, pull_date: dt.date, *, download: raw_tree.Download = raw_tree.download) -> list[PulledFile]:
     """Fetch the configured Urban bulk CSVs (serially) into data/raw/ipeds/<Pull date>/."""
-    urls = _urls(config)
-    for url in urls.values():
-        if "/api/" in urlparse(url).path:
-            raise StructuralBreak(f"Urban's /api/ is disallowed by robots.txt; use a /csv/ bulk file: {url}")
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
-    folder.mkdir(parents=True, exist_ok=True)
-    pulled = []
-    for url in urls.values():
-        dest = folder / _file_name(url)
-        download(url, dest)
-        data = dest.read_bytes()
-        pulled.append(
-            PulledFile(
-                source=SOURCE, request=f"GET {url}", url=url, path=dest, pull_date=pull_date,
-                bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), licence_citation=LICENCE_CITATION,
-            )
-        )
-    return pulled
+    urls = list(_urls(config).values())
+    for url in urls:
+        raw_tree.refuse_urban_api(url)
+    return raw_tree.fetch(config.layout, SOURCE, pull_date, urls, download, LICENCE_CITATION)
 
 
 # --------------------------------------------------------------------- clean
@@ -211,26 +168,18 @@ def clean_enrollment(raw: pl.DataFrame | pl.LazyFrame, *, raw_file: str, pull_da
     return check_schema(IpedsEnrollment, enrollment, "IPEDS enrollment")
 
 
-def _scan(path: Path) -> pl.LazyFrame:
-    if not path.exists():
-        raise StructuralBreak(f"IPEDS pull lacks {path.name} ({path.parent})")
-    return pl.scan_csv(path, infer_schema=False)
-
-
 def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one IPEDS pull (default: the latest). No pull at all: no-op, empty frame."""
     layout = config.layout
+    pull_date = pull_date or raw_tree.latest_pull_date(layout, SOURCE)
     if pull_date is None:
-        dates = pull_dates(layout)
-        if not dates:
-            return _empty(IpedsDirectory)
-        pull_date = dates[-1]
-    folder = layout.raw_source(SOURCE) / pull_date.isoformat()
+        return _empty(IpedsDirectory)
     urls = _urls(config)
     from_year = int(config.section(SOURCE)["directory_from_year"])
-    directory_name, enrollment_name = _file_name(urls["directory"]), _file_name(urls["enrollment"])
-    directory_raw, enrollment_raw = _scan(folder / directory_name), _scan(folder / enrollment_name)
-    input_hash = provenance.record_raw_inputs(config, SOURCE, [folder / directory_name, folder / enrollment_name])
+    directory_name, enrollment_name = raw_tree.file_name(urls["directory"]), raw_tree.file_name(urls["enrollment"])
+    paths = raw_tree.pulled_paths(layout, SOURCE, pull_date, [directory_name, enrollment_name], "IPEDS")
+    directory_raw, enrollment_raw = (pl.scan_csv(p, infer_schema=False) for p in paths)
+    input_hash = provenance.record_raw_inputs(config, SOURCE, paths)
     directory = clean_directory(directory_raw, from_year=from_year, raw_file=directory_name, pull_date=pull_date)
     enrollment = clean_enrollment(enrollment_raw, raw_file=enrollment_name, pull_date=pull_date)
     _log_clean(config, DIRECTORY_TABLE, directory_raw, directory, pull_date, input_hash, {

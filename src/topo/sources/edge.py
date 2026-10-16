@@ -22,22 +22,19 @@ Without any EDGE pull, `clean` is a no-op: no college Host then gets a Campus di
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import io
-import urllib.request
 import zipfile
-from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pandera.polars as pa
 import polars as pl
 from openpyxl import load_workbook
 
 from topo import provenance, run_log, spatial
-from topo.config import Config, Layout
+from topo.config import Config
 from topo.guards import StructuralBreak, check_schema, check_unique
-from topo.sources.usaspending import PulledFile
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile
 
 SOURCE = "edge"
 GEOCODES_TABLE = "edge_postsecondary_geocodes"
@@ -90,53 +87,16 @@ class EdgeSchoolDistricts(pa.DataFrameModel):
         unique = ["leaid", "district_type"]
 
 
-def pull_dates(layout: Layout) -> list[dt.date]:
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        try:
-            found.append(dt.date.fromisoformat(child.name))
-        except ValueError:
-            continue
-    return sorted(found)
-
-
-def _file_name(url: str) -> str:
-    return Path(urlparse(url).path).name
-
-
 def _urls(config: Config) -> dict[str, str]:
     settings = config.section(SOURCE)
     return {"geocodes": settings["postsecondary_geocodes_url"], "districts": settings["school_districts_url"]}
 
 
-Download = Callable[[str, Path], None]
-
-
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url, timeout=1800) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-
-
-def pull(config: Config, pull_date: dt.date, *, download: Download = _download) -> list[PulledFile]:
+def pull(
+    config: Config, pull_date: dt.date, *, download: raw_tree.Download = raw_tree.slow_download
+) -> list[PulledFile]:
     """Fetch the EDGE geocode and district zips (serially) into data/raw/edge/<Pull date>/."""
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
-    folder.mkdir(parents=True, exist_ok=True)
-    pulled = []
-    for url in _urls(config).values():
-        dest = folder / _file_name(url)
-        download(url, dest)
-        data = dest.read_bytes()
-        pulled.append(
-            PulledFile(
-                source=SOURCE, request=f"GET {url}", url=url, path=dest, pull_date=pull_date,
-                bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), licence_citation=LICENCE_CITATION,
-            )
-        )
-    return pulled
+    return raw_tree.fetch(config.layout, SOURCE, pull_date, _urls(config).values(), download, LICENCE_CITATION)
 
 
 # ------------------------------------------------------------------ geocodes
@@ -236,17 +196,13 @@ def _read_districts(path: Path, raw_file: str, pull_date: dt.date) -> tuple[int,
 def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one EDGE pull (default: the latest). No pull at all: no-op, empty frame."""
     layout = config.layout
+    pull_date = pull_date or raw_tree.latest_pull_date(layout, SOURCE)
     if pull_date is None:
-        dates = pull_dates(layout)
-        if not dates:
-            return _empty(EdgePostsecondaryGeocodes)
-        pull_date = dates[-1]
-    folder = layout.raw_source(SOURCE) / pull_date.isoformat()
-    names = {key: _file_name(url) for key, url in _urls(config).items()}
-    for name in names.values():
-        if not (folder / name).exists():
-            raise StructuralBreak(f"EDGE pull lacks {name} ({folder})")
-    geocodes_path, districts_path = folder / names["geocodes"], folder / names["districts"]
+        return _empty(EdgePostsecondaryGeocodes)
+    names = {key: raw_tree.file_name(url) for key, url in _urls(config).items()}
+    geocodes_path, districts_path = raw_tree.pulled_paths(
+        layout, SOURCE, pull_date, [names["geocodes"], names["districts"]], "EDGE"
+    )
     input_hash = provenance.record_raw_inputs(config, SOURCE, [geocodes_path, districts_path])
 
     raw_points = _read_geocode_rows(geocodes_path)

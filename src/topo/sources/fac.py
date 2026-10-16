@@ -19,20 +19,16 @@ Grant, an amount or a reconciliation row. Without any FAC pull, `clean` is a no-
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import urllib.request
-from collections.abc import Callable
-from pathlib import Path
-from urllib.parse import urlparse
 
 import pandera.polars as pa
 import polars as pl
 
 from topo import provenance, run_log
-from topo.config import Config, Layout
+from topo.config import Config
 from topo.domain.programs import LISTINGS
 from topo.guards import StructuralBreak, check_schema, check_unique
-from topo.sources.usaspending import PulledFile
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile
 
 SOURCE = "fac"
 AWARD_LINES_TABLE = "fac_award_lines"
@@ -98,23 +94,6 @@ class FacAudits(pa.DataFrameModel):
 # ---------------------------------------------------------------- pull dates
 
 
-def pull_dates(layout: Layout) -> list[dt.date]:
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        try:
-            found.append(dt.date.fromisoformat(child.name))
-        except ValueError:
-            continue
-    return sorted(found)
-
-
-def _file_name(url: str) -> str:
-    return Path(urlparse(url).path).name
-
-
 def _urls(config: Config) -> dict[str, str]:
     settings = config.section(SOURCE)
     return {"federal_awards": settings["federal_awards_url"], "general": settings["general_url"]}
@@ -122,33 +101,12 @@ def _urls(config: Config) -> dict[str, str]:
 
 # ---------------------------------------------------------------------- pull
 
-Download = Callable[[str, Path], None]
 
-
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url, timeout=1800) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-
-
-def pull(config: Config, pull_date: dt.date, *, download: Download = _download) -> list[PulledFile]:
+def pull(
+    config: Config, pull_date: dt.date, *, download: raw_tree.Download = raw_tree.slow_download
+) -> list[PulledFile]:
     """Fetch the configured FAC bulk CSVs into data/raw/fac/<Pull date>/."""
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
-    folder.mkdir(parents=True, exist_ok=True)
-    pulled = []
-    for url in _urls(config).values():
-        dest = folder / _file_name(url)
-        download(url, dest)
-        digest, size = hashlib.sha256(), 0
-        with dest.open("rb") as f:
-            while chunk := f.read(1 << 20):
-                digest.update(chunk)
-                size += len(chunk)
-        pulled.append(PulledFile(
-            source=SOURCE, request=f"GET {url}", url=url, path=dest, pull_date=pull_date,
-            bytes=size, sha256=digest.hexdigest(), licence_citation=LICENCE_CITATION,
-        ))
-    return pulled
+    return raw_tree.fetch(config.layout, SOURCE, pull_date, _urls(config).values(), download, LICENCE_CITATION)
 
 
 # --------------------------------------------------------------------- clean
@@ -241,16 +199,13 @@ def clean_audits(
 def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one FAC pull (default: the latest). No pull at all: no-op, empty frame."""
     layout = config.layout
+    pull_date = pull_date or raw_tree.latest_pull_date(layout, SOURCE)
     if pull_date is None:
-        dates = pull_dates(layout)
-        if not dates:
-            return _empty(FacAwardLines)
-        pull_date = dates[-1]
-    folder = layout.raw_source(SOURCE) / pull_date.isoformat()
-    paths = {table: folder / _file_name(url) for table, url in _urls(config).items()}
-    for path in paths.values():
-        if not path.exists():
-            raise StructuralBreak(f"FAC pull lacks {path.name} ({folder})")
+        return _empty(FacAwardLines)
+    urls = _urls(config)
+    paths = dict(zip(urls, raw_tree.pulled_paths(
+        layout, SOURCE, pull_date, [raw_tree.file_name(url) for url in urls.values()], "FAC"
+    )))
     input_hash = provenance.record_raw_inputs(config, SOURCE, list(paths.values()))
 
     raw_lines = pl.scan_csv(paths["federal_awards"], infer_schema=False)

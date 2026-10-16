@@ -20,19 +20,15 @@ GEAR UP partnerships come out as naming no district, still on the target list.
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import urllib.request
-from collections.abc import Callable
-from pathlib import Path
-from urllib.parse import urlparse
 
 import pandera.polars as pa
 import polars as pl
 
 from topo import provenance, run_log
-from topo.config import Config, Layout
+from topo.config import Config
 from topo.guards import StructuralBreak, check_schema, check_unique
-from topo.sources.usaspending import PulledFile
+from topo.sources import raw as raw_tree
+from topo.sources.raw import PulledFile
 
 SOURCE = "ccd"
 LEA_DIRECTORY_TABLE = "ccd_lea_directory"
@@ -69,53 +65,14 @@ class CcdLeaDirectory(pa.DataFrameModel):
         unique = ["leaid", "year"]
 
 
-# ---------------------------------------------------------------- pull dates
-
-
-def pull_dates(layout: Layout) -> list[dt.date]:
-    root = layout.raw_source(SOURCE)
-    if not root.is_dir():
-        return []
-    found = []
-    for child in root.iterdir():
-        try:
-            found.append(dt.date.fromisoformat(child.name))
-        except ValueError:
-            continue
-    return sorted(found)
-
-
-def _file_name(url: str) -> str:
-    return Path(urlparse(url).path).name
-
-
 # ---------------------------------------------------------------------- pull
 
-Download = Callable[[str, Path], None]
 
-
-def _download(url: str, dest: Path) -> None:
-    with urllib.request.urlopen(url, timeout=600) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-
-
-def pull(config: Config, pull_date: dt.date, *, download: Download = _download) -> list[PulledFile]:
+def pull(config: Config, pull_date: dt.date, *, download: raw_tree.Download = raw_tree.download) -> list[PulledFile]:
     """Fetch the configured Urban LEA directory CSV into data/raw/ccd/<Pull date>/."""
     url = config.section(SOURCE)["lea_directory_url"]
-    if "/api/" in urlparse(url).path:
-        raise StructuralBreak(f"Urban's /api/ is disallowed by robots.txt; use a /csv/ bulk file: {url}")
-    folder = config.layout.raw_source(SOURCE) / pull_date.isoformat()
-    folder.mkdir(parents=True, exist_ok=True)
-    dest = folder / _file_name(url)
-    download(url, dest)
-    data = dest.read_bytes()
-    return [
-        PulledFile(
-            source=SOURCE, request=f"GET {url}", url=url, path=dest, pull_date=pull_date,
-            bytes=len(data), sha256=hashlib.sha256(data).hexdigest(), licence_citation=LICENCE_CITATION,
-        )
-    ]
+    raw_tree.refuse_urban_api(url)
+    return raw_tree.fetch(config.layout, SOURCE, pull_date, [url], download, LICENCE_CITATION)
 
 
 # --------------------------------------------------------------------- clean
@@ -157,16 +114,12 @@ def clean_lea_directory(
 def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one CCD pull (default: the latest). No pull at all: no-op, empty frame."""
     layout = config.layout
+    pull_date = pull_date or raw_tree.latest_pull_date(layout, SOURCE)
     if pull_date is None:
-        dates = pull_dates(layout)
-        if not dates:
-            return _empty()
-        pull_date = dates[-1]
+        return _empty()
     settings = config.section(SOURCE)
-    name = _file_name(settings["lea_directory_url"])
-    path = layout.raw_source(SOURCE) / pull_date.isoformat() / name
-    if not path.exists():
-        raise StructuralBreak(f"CCD pull lacks {name} ({path.parent})")
+    name = raw_tree.file_name(settings["lea_directory_url"])
+    [path] = raw_tree.pulled_paths(layout, SOURCE, pull_date, [name], "CCD")
     raw = pl.scan_csv(path, infer_schema=False)
     from_year = int(settings["directory_from_year"])
     agency_types = [int(t) for t in settings["agency_types"]]
