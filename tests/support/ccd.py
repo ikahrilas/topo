@@ -15,7 +15,7 @@ import polars as pl
 # The Urban LEA directory columns the pipeline reads, plus a few it must ignore.
 LEA_COLUMNS = [
     "leaid", "year", "lea_name", "fips", "state_leaid", "state_location", "street_location",
-    "city_location", "zip_location", "agency_type", "phone", "number_of_schools",
+    "city_location", "zip_location", "agency_type", "phone", "number_of_schools", "enrollment",
 ]
 
 LEA_CSV = "school-districts_lea_directory.csv"
@@ -30,6 +30,7 @@ def lea_row(
     agency_type: int = 1,
     city: str = "ANYTOWN",
     zip: str = "00000",
+    enrollment: int | None = None,
 ) -> dict[str, str]:
     return {
         "leaid": leaid,
@@ -44,6 +45,7 @@ def lea_row(
         "agency_type": str(agency_type),
         "phone": "5555555555",
         "number_of_schools": "12",
+        "enrollment": "-2" if enrollment is None else str(enrollment),
     }
 
 

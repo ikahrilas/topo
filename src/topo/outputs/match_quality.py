@@ -5,8 +5,10 @@ sample size and gating; overrides in force; review and unmatched lists by FAIN;
 Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
 with no UEI; breakdowns by Program and by start year; Pull date, As-of date and
 input hashes. Dollars are obligations over the reporting-window fiscal years.
-Later tickets add the renewal-timing backtest, the observed-gap table, context
-reason codes and the founder spot-check block.
+The observed-gap table per Program and the renewal-timing backtest scores with
+its misses (#41). Context reason codes: Grants per Local context reason code
+(#38), every code listed. The founder spot-check block counts Review findings
+by review date, apart from the answer key.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import polars as pl
 
 from topo.domain.host_gating import Gate
 from topo.domain.host_linking import MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
+from topo.domain.local_context import context_reason_counts
 from topo.fiscal import fiscal_year
 from topo.outputs.delivery import delivery_path, write_new
 from topo.outputs.review_queue import grant_dollars
@@ -41,6 +44,13 @@ class MatchQualityInputs:
     answer_key_rows: int
     tuning_set_rows: int
     input_hashes: list[tuple[str, str]]  # (path, sha256)
+    # Renewal timing (#41): the observed-gap table and the backtest scores.
+    cohort_timing: pl.DataFrame | None = None  # topo.domain.renewal_timing.CohortTiming
+    backtest: pl.DataFrame | None = None  # topo.domain.renewal_backtest: renewal_backtest
+    backtest_grants: pl.DataFrame | None = None  # renewal_backtest_grants
+    backtest_bar: float = 0.95
+    local_context: pl.DataFrame | None = None  # joined local_context (topo.domain.local_context.LocalContext)
+    founder_spot_check: pl.DataFrame | None = None  # topo.review_findings.spot_check_summary
 
 
 def _money(value: float | None) -> str:
@@ -208,9 +218,99 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
     out += ["", "## By start year", "", "Fiscal year of the Grant's project start.", ""]
     out += _table(["Start FY", *header], _outcome_counts(by_year, "start_fy"))
 
+    out += _renewal_timing_sections(inputs)
+    if inputs.local_context is not None:
+        reasons = context_reason_counts(inputs.local_context)
+        out += [
+            "",
+            "## Context reason codes",
+            "",
+            "Grants whose Local context is blank, in whole or in part, by reason. Context comes only through the "
+            "Host institution, never the Recipient or the state. A Grant can carry more than one code.",
+            "",
+        ]
+        out += _table(["Context reason", "Grants"], reasons.rows())
+    out += _founder_spot_check(inputs.founder_spot_check)
+
     out += ["", "## Inputs", ""]
     out += _table(["Input", "SHA-256"], [[path, sha] for path, sha in inputs.input_hashes])
     return "\n".join(out) + "\n"
+
+
+def _share(value: float | None) -> str:
+    return "" if value is None else f"{100 * value:.1f}%"
+
+
+def _renewal_timing_sections(inputs: MatchQualityInputs) -> list[str]:
+    """The observed-gap table per Program and the renewal-timing backtest with its misses."""
+    out: list[str] = []
+    if inputs.cohort_timing is not None:
+        out += [
+            "",
+            "## Observed gaps between Cohort starts",
+            "",
+            "Per Program, each Cohort start (read over the pull and the lookback) and the gap in months from the "
+            "previous one. A TRIO Program with any gap other than the cycle is \"timing not predicted\".",
+            "",
+        ]
+        out += _table(
+            ["Program", "Cohort FY", "Cohort start", "Observed gap (months)", "Renewal timing"],
+            [[r["program"], f"FY{r['cohort_fy']}", r["cohort_start"], r["observed_gap_months"], r["timing"]]
+             for r in inputs.cohort_timing.sort("program", "cohort_fy").iter_rows(named=True)],
+        )
+    if inputs.backtest is not None:
+        fys = inputs.backtest["competition_fy"].unique().to_list()
+        heading = f"Renewal-timing backtest (FY{fys[0]})" if len(fys) == 1 else "Renewal-timing backtest"
+        out += [
+            "",
+            f"## {heading}",
+            "",
+            "Each TRIO Program's rule is replayed under its own As-of date, 12 months before its actual deadline, "
+            "seeing only actions dated and deadlines passed by then. Timing error is the Predicted due date minus "
+            "the actual deadline, in months. A prior-Cohort Grant re-competed when no Budget period starting on or "
+            "after the new Cohort's start was funded on it. A Program passes when the Re-competing soon flag reaches "
+            f"{inputs.backtest_bar:.0%} recall and {inputs.backtest_bar:.0%} precision. The Succession rate is "
+            "descriptive only: USAspending can't see losers or non-applicants.",
+            "",
+        ]
+        out += _table(
+            ["Program", "Backtest As-of date", "Prior Cohort", "Predicted due date", "Evidence tier",
+             "Actual deadline", "Timing error (months)", "Grants", "Re-competed", "Flagged",
+             "Flagged and re-competed", "Recall", "Precision", "Result", "Succession rate"],
+            [
+                [r["program"], r["as_of"], None if r["prior_cohort_fy"] is None else f"FY{r['prior_cohort_fy']}",
+                 r["predicted_due_date"] or r["timing"], r["evidence_tier"], r["actual_deadline"],
+                 r["timing_error_months"], r["grants"], r["re_competed"], r["flagged"],
+                 r["flagged_and_re_competed"], _share(r["recall"]), _share(r["precision"]), r["result"],
+                 None if r["with_succession"] is None else f"{r['with_succession']} of {r['re_competed']}"]
+                for r in inputs.backtest.iter_rows(named=True)
+            ],
+        )
+    if inputs.backtest_grants is not None:
+        misses = inputs.backtest_grants.filter(pl.col("flagged") != pl.col("re_competed")).sort("program", "fain")
+        out += ["", "## Backtest misses", "",
+                f"{misses.height} prior-Cohort Grants whose flag disagreed with what happened.", ""]
+        out += _table(
+            ["Program", "FAIN", "Latest readable status (backtest As-of)", "Flagged", "Re-competed"],
+            [[r["program"], r["fain"], r["latest_readable_status"], "yes" if r["flagged"] else "no",
+              "yes" if r["re_competed"] else "no"] for r in misses.iter_rows(named=True)],
+        )
+    return out
+
+
+def _founder_spot_check(summary: pl.DataFrame | None) -> list[str]:
+    """The founder spot-check block: Review findings by review date, apart from the answer key."""
+    out = [
+        "",
+        "## Founder spot-check",
+        "",
+        "Review findings from the founder's spot checks, by review date. They are kept apart from the answer "
+        "key, never scored in the accuracy above, and never change an override by themselves.",
+    ]
+    if summary is None or not summary.height:
+        return out + ["", "No Review findings yet."]
+    out.append("")
+    return out + _table(list(summary.columns), [list(r) for r in summary.iter_rows()])
 
 
 def write_match_quality(text: str, output_dir: Path, pull_date: dt.date) -> Path:

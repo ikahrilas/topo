@@ -11,15 +11,20 @@ one HostLink out. The outcome is one of
 
 and the Case label names the rule that decided it. No numeric score.
 
-Rules in this module (#32): Recipient UEI -> IPEDS `ueis` and Recipient name ->
-IPEDS names (every name since `directory_from_year`, plus `inst_alias`), both
-restricted to the Recipient's state; IPEDS system offices (sector 0) never beat
-a real campus; the No single Host rules. GEAR UP partnerships (#36) link only
-to districts (CCD LEAIDs) named by the Recipient itself or the award
-descriptions, never to the college partner. Later tickets add the ED list
-name, award-description phrases for colleges, campus words, address
-tiebreaks and IPEDS merges (#35). Case labels follow the prototype taxonomy
-(prototypes/host-linking/README.md).
+College signals, every one restricted to the Recipient's state (#32, #35):
+Recipient UEI -> IPEDS `ueis`; Recipient name -> IPEDS names (every name since
+`directory_from_year`, plus `inst_alias`); the ED list "Recipient/ campus" text
+(by exact FAIN) and award-description phrases -> IPEDS names, former names,
+aliases and generated acronyms; campus words, checked only against sibling
+campuses; and address (city or ZIP), which only tags candidates already found.
+ED text outranks the description. IPEDS merges resolve to the unit as of the
+Grant's start year, else the same-state surviving unit. IPEDS system offices
+(sector 0) never beat a real campus and alone go to review. The No single Host
+rules. GEAR UP partnerships (#36) link only to districts (CCD LEAIDs) named by
+the Recipient itself or the award descriptions, never to the college partner.
+Case labels follow the prototype taxonomy (prototypes/host-linking/README.md),
+with notes appended after "+": `followed_ipeds_merge`,
+`ipeds_unit_as_of_start_year`, `no_uei`.
 """
 
 from __future__ import annotations
@@ -114,6 +119,40 @@ def recipient_kind(business_types: str | None, recipient_name: str | None) -> st
 
 # ---------------------------------------------------------------- lookups
 
+# Program words, not institution words: an acronym equal to one would light up on every description.
+PROGRAM_WORDS = {
+    "TRIO", "UB", "UBMS", "VUB", "SSS", "ETS", "TS", "EOC", "MCNAIR", "GEAR", "UP", "STEM", "MATH", "SCIENCE",
+    "PROGRAM", "PROJECT", "UPWARD", "BOUND", "TALENT", "SEARCH", "STUDENT", "SUPPORT", "SERVICES",
+    "EDUCATIONAL", "OPPORTUNITY", "CENTER", "VETERANS", "USA", "US", "THE", "ACE", "RISE", "SOAR", "CAP",
+}
+# Words that never tell one sibling campus from another.
+GENERIC = {
+    "UNIVERSITY", "COLLEGE", "CAMPUS", "MAIN", "COMMUNITY", "TECHNICAL", "BRANCH", "SCHOOL", "STATE",
+    "SYSTEM", "OFFICE", "CENTRAL", "CENTER", "CITY", "INSTITUTE", "ONLINE", "GLOBAL", "COUNTY",
+}
+_CAMPUS_SUFFIX = re.compile(r"([- ]+Main Campus| District)$", re.IGNORECASE)
+_ALIAS_ACRONYM = re.compile(r"[A-Z]{2,6}")
+
+# Notes appended to a Case label ("uei_confirmed+followed_ipeds_merge").
+FOLLOWED_IPEDS_MERGE = "followed_ipeds_merge"  # no record at the start year: linked to the same-state survivor
+UNIT_AS_OF_START_YEAR = "ipeds_unit_as_of_start_year"  # merged later: kept as the unit it was at the start year
+NO_UEI = "no_uei"  # no Recipient UEI: decided on name, ED list text and description only
+
+
+def _tokens(text: str | None) -> list[str]:
+    return name_key(text).split()
+
+
+def acronym(name: str | None) -> str:
+    """Generated acronym of a name of three or more words ('Horry-Georgetown Technical College' -> 'HGTC')."""
+    words = [w for w in _norm(name).split() if w not in _DROP]
+    return "".join(w[0] for w in words) if len(words) >= 3 else ""
+
+
+def base_key(name: str | None) -> str:
+    """A name before its campus suffix: 'University of Cincinnati-Clermont College' -> 'UNIVERSITY CINCINNATI'."""
+    return name_key(re.split(r"[-,]", name or "")[0])
+
 
 @dataclass(frozen=True)
 class IpedsUnit:
@@ -123,6 +162,10 @@ class IpedsUnit:
     sector: int | None
     names: frozenset[str]  # name keys: every name since directory_from_year, plus aliases
     ueis: frozenset[str]
+    city: str = ""  # latest city, normalized
+    zip5: str = ""
+    newid: str | None = None  # the UNITID this unit merged into
+    years: frozenset[int] = frozenset()  # directory years the unit reported
 
     @property
     def is_system_office(self) -> bool:
@@ -131,6 +174,10 @@ class IpedsUnit:
 
 def _split(values: str | None) -> list[str]:
     return [v.strip() for v in (values or "").split("|") if v.strip()]
+
+
+def _frozen(index: dict) -> dict:
+    return {k: frozenset(v) for k, v in index.items()}
 
 
 # District name forms (host-linking prototype): a district is named by its core
@@ -203,33 +250,60 @@ class HostLookups:
     districts: dict[str, District] = field(default_factory=dict)
     _district_by_phrase: dict[tuple[str, tuple[str, ...]], frozenset[str]] = field(default_factory=dict, repr=False)
     _district_by_core: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
+    _by_phrase: dict[tuple[str, tuple[str, ...]], frozenset[str]] = field(default_factory=dict, repr=False)
+    _by_acronym: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
+    _by_base: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict, repr=False)
+    _years: tuple[int, int] | None = None  # first and last IPEDS directory year
 
     @classmethod
     def from_directory(cls, directory: pl.DataFrame, lea_directory: pl.DataFrame | None = None) -> "HostLookups":
         """Build from the cleaned IPEDS directory history (topo.sources.ipeds) and, for
         district Hosts, the cleaned CCD LEA directory history (topo.sources.ccd)."""
-        rows = directory.sort("unitid", "year").iter_rows(named=True)
         latest: dict[str, dict] = {}
-        names: dict[str, set[str]] = defaultdict(set)
+        texts: dict[str, set[str]] = defaultdict(set)  # every name and non-acronym alias
+        acronyms: dict[str, set[str]] = defaultdict(set)
         ueis: dict[str, set[str]] = defaultdict(set)
-        for r in rows:
+        years: dict[str, set[int]] = defaultdict(set)
+        newids: dict[str, str] = {}
+        for r in directory.sort("unitid", "year").iter_rows(named=True):
             uid = r["unitid"]
             latest[uid] = r
-            names[uid] |= {name_key(n) for n in [r["inst_name"], *_split(r["inst_alias"])] if name_key(n)}
+            years[uid].add(r["year"])
+            if r["newid"]:
+                newids[uid] = r["newid"]
+            texts[uid] |= {n for n in (r["inst_name"], _CAMPUS_SUFFIX.sub("", r["inst_name"] or "")) if n}
+            for alias in _split(r["inst_alias"]):
+                (acronyms if _ALIAS_ACRONYM.fullmatch(alias) else texts)[uid].add(alias)
             ueis[uid] |= set(_split(r["ueis"]))
-        units = {
-            uid: IpedsUnit(uid, r["inst_name"], r["state_abbr"], r["sector"], frozenset(names[uid]), frozenset(ueis[uid]))
-            for uid, r in latest.items()
-        }
-        by_uei: dict[tuple[str, str], set[str]] = defaultdict(set)
-        by_name: dict[tuple[str, str], set[str]] = defaultdict(set)
+        units = {}
+        for uid, r in latest.items():
+            generated = acronym(r["inst_name"])
+            if len(generated) >= 4:
+                acronyms[uid].add(generated)
+            units[uid] = IpedsUnit(
+                uid, r["inst_name"], r["state_abbr"], r["sector"],
+                frozenset(k for k in map(name_key, texts[uid] | acronyms[uid]) if k), frozenset(ueis[uid]),
+                city=_norm(r["city"]), zip5=(r["zip"] or "")[:5], newid=newids.get(uid),
+                years=frozenset(years[uid]),
+            )
+        by_uei, by_name, by_unit_phrase, by_acronym, by_base = (defaultdict(set) for _ in range(5))
         for uid, unit in units.items():
-            if unit.state is None:
+            state = unit.state
+            if state is None:
                 continue
             for uei in unit.ueis:
-                by_uei[(unit.state, uei)].add(uid)
+                by_uei[(state, uei)].add(uid)
             for key in unit.names:
-                by_name[(unit.state, key)].add(uid)
+                by_name[(state, key)].add(uid)
+            for text in texts[uid]:
+                phrase = tuple(_tokens(text))
+                if len(phrase) >= 2:  # single plain words ("PACIFIC", "MARSHALL") are too loose
+                    by_unit_phrase[(state, phrase)].add(uid)
+            for acr in map(_norm, acronyms[uid]):
+                if len(acr) >= 3 and acr not in PROGRAM_WORDS:
+                    by_acronym[(state, acr)].add(uid)
+            by_base[(state, base_key(unit.name))].add(uid)
+        all_years = [y for ys in years.values() for y in ys]
         districts = _districts(lea_directory) if lea_directory is not None else {}
         by_phrase: dict[tuple[str, tuple[str, ...]], set[str]] = defaultdict(set)
         by_core: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -242,11 +316,15 @@ class HostLookups:
                 by_core[(district.state, core)].add(leaid)
         return cls(
             units,
-            {k: frozenset(v) for k, v in by_uei.items()},
-            {k: frozenset(v) for k, v in by_name.items()},
+            _frozen(by_uei),
+            _frozen(by_name),
             districts,
-            {k: frozenset(v) for k, v in by_phrase.items()},
-            {k: frozenset(v) for k, v in by_core.items()},
+            _frozen(by_phrase),
+            _frozen(by_core),
+            _by_phrase=_frozen(by_unit_phrase),
+            _by_acronym=_frozen(by_acronym),
+            _by_base=_frozen(by_base),
+            _years=(min(all_years), max(all_years)) if all_years else None,
         )
 
     def units_by_uei(self, state: str, uei: str | None) -> frozenset[str]:
@@ -255,6 +333,60 @@ class HostLookups:
     def units_by_name(self, state: str, name: str | None) -> frozenset[str]:
         key = name_key(name)
         return self._by_name.get((state, key), frozenset()) if key else frozenset()
+
+    def units_by_phrase(self, state: str, text: str | None) -> frozenset[str]:
+        """Units whose name, former name, alias or generated acronym appears in the text. A phrase
+        nested in a longer matching phrase is dropped ('University of Cincinnati' inside
+        'University of Cincinnati Clermont College')."""
+        tokens = _tokens(text)
+        longest = max((len(p) for _, p in self._by_phrase), default=0)
+        spans = []
+        for i in range(len(tokens)):
+            for n in range(min(longest, len(tokens) - i), 1, -1):
+                hit = self._by_phrase.get((state, tuple(tokens[i:i + n])))
+                if hit:
+                    spans.append((i, i + n, hit))
+        found: set[str] = set()
+        for start, end, hit in spans:
+            if not any(s <= start and end <= e and (e - s) > (end - start) for s, e, _ in spans):
+                found |= hit
+        for word in _norm(text).split():
+            found |= self._by_acronym.get((state, word), frozenset())
+        return frozenset(found)
+
+    def siblings(self, state: str, uids: list[str]) -> frozenset[str]:
+        """Same-state campus families of the units: units sharing a base name with at least one
+        other unit. Not the IPEDS system name, which whole state community-college systems share.
+        A unit with no sibling is in no family."""
+        family: set[str] = set()
+        for uid in uids:
+            group = self._by_base.get((state, base_key(self.units[uid].name)), frozenset())
+            if len(group) >= 2:
+                family |= group
+        return frozenset(family)
+
+    def as_of_start_year(self, uid: str, start_year: int | None, state: str) -> tuple[str | None, str | None]:
+        """The unit to link for a Grant starting in `start_year`, and its merge note.
+
+        A unit that later merged is kept when it reported in the start year (clamped to the
+        directory's years). Otherwise its surviving unit is linked, same state only: an
+        out-of-state survivor gives None."""
+        unit = self.units[uid]
+        if unit.newid is None or self._years is None:
+            return uid, None
+        first, last = self._years
+        year = min(max(start_year if start_year is not None else last, first), last)
+        if year in unit.years:
+            return uid, UNIT_AS_OF_START_YEAR
+        seen, current = {uid}, unit
+        while current.newid and current.newid not in seen and current.newid in self.units:
+            seen.add(current.newid)
+            current = self.units[current.newid]
+        if current.unitid == uid:
+            return uid, None  # the survivor is not in the directory: nothing better to link
+        if current.state != state:
+            return None, None
+        return current.unitid, FOLLOWED_IPEDS_MERGE
 
     def districts_by_core(self, state: str, recipient_name: str | None) -> frozenset[str]:
         """Districts whose core name equals the Recipient's (the Recipient is the district)."""
@@ -285,14 +417,20 @@ class HostLookups:
 
 @dataclass(frozen=True)
 class GrantFacts:
-    """What the linker knows about one Grant (from its latest USAspending action)."""
+    """What the linker knows about one Grant: its Recipient (latest USAspending action), its
+    award descriptions, the ED list "Recipient/ campus" text (by exact FAIN) and its start year."""
 
     fain: str
     recipient_name: str | None
     recipient_uei: str | None
     recipient_state: str | None
     business_types: str | None = None
+    recipient_city: str | None = None
+    recipient_zip: str | None = None
     descriptions: tuple[str, ...] = ()  # the Grant's distinct award descriptions
+    ed_recipient_campus: str | None = None
+    ed_campus: str | None = None  # the ED text after "/"
+    start_year: int | None = None
 
     @property
     def fain_prefix(self) -> str:
@@ -322,20 +460,152 @@ class HostLink:
         return HOST_CONFIDENCE[self.outcome]
 
 
-def _college_signals(grant: GrantFacts, lookups: HostLookups) -> dict[str, set[str]]:
-    """UNITID -> signals, same state only. A Grant with no state has no candidates."""
+# Signals, best first: uei, name, ED list text, then description phrases and campus words.
+# "address" only breaks ties.
+ED_TEXT = {"ed_list", "ed_campus"}
+DESC_TEXT = {"desc", "desc_campus"}
+SPECIFIC = ED_TEXT | DESC_TEXT
+SEEDS = {"uei", "name", "ed_list"}  # the units whose sibling campuses are checked for campus words
+
+
+def _college_signals(grant: GrantFacts, lookups: HostLookups) -> tuple[dict[str, set[str]], dict[str, str]]:
+    """UNITID -> signals, same state only, and UNITID -> merge note. A Grant with no state has no candidates."""
     state = grant.recipient_state
     signals: dict[str, set[str]] = defaultdict(set)
     if not state:
-        return signals
+        return signals, {}
     for uid in lookups.units_by_uei(state, grant.recipient_uei):
         signals[uid].add("uei")
     for uid in lookups.units_by_name(state, grant.recipient_name):
         signals[uid].add("name")
+    for uid in lookups.units_by_phrase(state, (grant.ed_recipient_campus or "").replace("/", " ")):
+        signals[uid].add("ed_list")
+    for description in grant.descriptions:
+        for uid in lookups.units_by_phrase(state, description):
+            signals[uid].add("desc")
+    _add_campus_words(grant, lookups, signals)
+    signals, merges = _resolve_merges(grant, lookups, signals)
     if any(not lookups.units[uid].is_system_office for uid in signals):
         for uid in [uid for uid in signals if lookups.units[uid].is_system_office]:
             del signals[uid]
-    return signals
+    _add_address(grant, lookups, signals)
+    return signals, merges
+
+
+def _add_campus_words(grant: GrantFacts, lookups: HostLookups, signals: dict[str, set[str]]) -> None:
+    """Campus words: a sibling campus whose distinguishing words (or their initials) appear in the
+    ED campus text or the description ('UC CLERMONT', 'OHIO STATE ATI'). Only siblings of the units
+    found by UEI, name or ED list are checked, so campus words never reach another college."""
+    seeds = sorted(uid for uid, sig in signals.items() if sig & SEEDS)
+    if not seeds:
+        return
+    common = set.intersection(*(set(_tokens(lookups.units[uid].name)) for uid in seeds))
+    texts = {"ed_campus": grant.ed_campus, "desc_campus": " || ".join(grant.descriptions)}
+    for uid in sorted(lookups.siblings(grant.recipient_state, seeds)):
+        if uid in seeds and len(seeds) == 1:
+            continue
+        rest = [t for t in _tokens(lookups.units[uid].name) if t not in common]
+        distinct = {t for t in rest if t not in GENERIC}
+        initials = "".join(t[0] for t in rest) if len(rest) >= 2 else ""
+        for signal, text in texts.items():
+            words = set(_tokens(text)) | set(_norm(text).split())
+            if distinct and (distinct <= words or (len(initials) >= 3 and initials in words)):
+                signals[uid].add(signal)
+
+
+def _resolve_merges(
+    grant: GrantFacts, lookups: HostLookups, signals: dict[str, set[str]]
+) -> tuple[dict[str, set[str]], dict[str, str]]:
+    """Move each candidate to its unit as of the Grant's start year (ADR 0002 merge policy)."""
+    resolved: dict[str, set[str]] = defaultdict(set)
+    notes: dict[str, str | None] = {}
+    for uid, sig in signals.items():
+        target, note = lookups.as_of_start_year(uid, grant.start_year, grant.recipient_state)
+        if target is None:
+            continue
+        resolved[target] |= sig
+        if target == uid:
+            notes[target] = note  # a unit found directly keeps its own note
+        else:
+            notes.setdefault(target, note)
+    return resolved, {uid: note for uid, note in notes.items() if note}
+
+
+def _add_address(grant: GrantFacts, lookups: HostLookups, signals: dict[str, set[str]]) -> None:
+    """Address agreement (city or ZIP) on a candidate already found. Never a source of candidates:
+    it is the Recipient's SAM address, not where the project runs."""
+    city, zip5 = _norm(grant.recipient_city), (grant.recipient_zip or "")[:5]
+    for uid, sig in signals.items():
+        unit = lookups.units[uid]
+        if (zip5 and unit.zip5 == zip5) or (city and unit.city == city):
+            sig.add("address")
+
+
+def _with(colleges: dict[str, set[str]], wanted: set[str]) -> list[str]:
+    return sorted(uid for uid, sig in colleges.items() if sig & wanted)
+
+
+def _decide_college(
+    colleges: dict[str, set[str]], kind: str, lookups: HostLookups
+) -> tuple[str, str, str | None]:
+    """(outcome, Case label, UNITID or None) for one or more college candidates."""
+    if len(colleges) == 1:
+        ((uid, with_address),) = colleges.items()
+        sig = with_address - {"address"}
+        if lookups.units[uid].is_system_office:
+            return REVIEW, "only_candidate_is_system_office", uid
+        if "uei" in sig and len(sig) >= 2:
+            return MATCHED, "uei_confirmed", uid
+        if sig & SPECIFIC and (sig & {"uei", "name"} or "address" in with_address):
+            return MATCHED, "campus_text_confirmed", uid
+        if sig == {"uei"}:
+            return (MATCHED, "uei_only", uid) if kind in (IHE, AUX) else (REVIEW, "uei_only_non_college", uid)
+        if sig == {"name"} and "address" in with_address:
+            return MATCHED, "name_and_address", uid
+        return REVIEW, "single_weak_signal:" + "+".join(sorted(sig)), uid
+
+    uei = _with(colleges, {"uei"})
+
+    def overrides_uei(pick: str) -> bool:
+        return bool(uei) and pick not in uei
+
+    # Campus words pick one sibling campus; ED campus text outranks the description's.
+    campus = _with(colleges, {"ed_campus"}) or _with(colleges, {"desc_campus"})
+    if len(campus) == 1:
+        pick = campus[0]
+        contradicted = "ed_campus" in colleges[pick] and any(
+            "desc_campus" in sig for uid, sig in colleges.items() if uid != pick
+        )
+        if not contradicted:
+            return MATCHED, "campus_named_overrides" if overrides_uei(pick) else "campus_named", pick
+        if not overrides_uei(pick):
+            return MATCHED, "ed_list_outranks_desc", pick
+        return REVIEW, "several_campuses_named", None
+
+    # Names from the ED list or the description; ED text outranks the description.
+    specific = _with(colleges, SPECIFIC)
+    if len(specific) == 1:
+        pick = specific[0]
+        if overrides_uei(pick):
+            return REVIEW, "campus_text_overrides_uei", pick
+        return MATCHED, "campus_text_picks_one", pick
+    if len(specific) > 1:
+        both = [uid for uid in specific if {"ed_list", "desc"} <= colleges[uid]]
+        if len(both) == 1:
+            return MATCHED, "ed_list_and_desc_agree", both[0]
+        ed = _with(colleges, ED_TEXT)
+        if len(ed) == 1 and not overrides_uei(ed[0]):
+            return MATCHED, "ed_list_outranks_desc", ed[0]
+        return REVIEW, "several_campuses_named", None
+
+    # Only UEI and name: the address breaks the tie.
+    if len(uei) == 1:
+        pick = uei[0]
+        return (MATCHED if "address" in colleges[pick] else REVIEW), "uei_vs_name_conflict", pick
+    by_address = _with(colleges, {"address"})
+    if len(by_address) == 1:
+        return REVIEW, "system_campus_by_address", by_address[0]
+    return REVIEW, "system_campus_not_stated", None
 
 
 def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
@@ -343,7 +613,7 @@ def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
     kind = recipient_kind(grant.business_types, grant.recipient_name)
     if grant.fain_prefix == GEAR_UP_PARTNERSHIP_PREFIX:
         return _link_gear_up_partnership(grant, kind, lookups)
-    colleges = _college_signals(grant, lookups)
+    colleges, merges = _college_signals(grant, lookups)
 
     candidates = tuple(
         Candidate(UNITID, uid, lookups.units[uid].name, tuple(sorted(sig)))
@@ -351,10 +621,13 @@ def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
     )
 
     def result(outcome: str, case_label: str, pick: str | None = None) -> HostLink:
+        notes = [merges[pick]] if pick in merges else []
+        if outcome != NO_SINGLE_HOST and not grant.recipient_uei:
+            notes.append(NO_UEI)
         return HostLink(
             fain=grant.fain,
             outcome=outcome,
-            case_label=case_label,
+            case_label="+".join([case_label, *notes]),
             host_kind=UNITID if pick else None,
             host_id=pick,
             host_name=lookups.units[pick].name if pick else None,
@@ -366,22 +639,8 @@ def link_host(grant: GrantFacts, lookups: HostLookups) -> HostLink:
     if kind == STATE:
         return result(NO_SINGLE_HOST, "state_agency_no_site_named")
 
-    if len(colleges) == 1:
-        ((uid, sig),) = colleges.items()
-        if sig == {"uei", "name"}:
-            return result(MATCHED, "uei_confirmed", uid)
-        if lookups.units[uid].is_system_office:
-            return result(REVIEW, "only_candidate_is_system_office", uid)
-        if sig == {"uei"}:
-            if kind in (IHE, AUX):
-                return result(MATCHED, "uei_only", uid)
-            return result(REVIEW, "uei_only_non_college", uid)
-        return result(REVIEW, "single_weak_signal:" + "+".join(sorted(sig)), uid)
     if colleges:
-        by_uei = [uid for uid, sig in colleges.items() if "uei" in sig]
-        if len(by_uei) == 1:
-            return result(REVIEW, "uei_vs_name_conflict", by_uei[0])
-        return result(REVIEW, "system_campus_not_stated")
+        return result(*_decide_college(colleges, kind, lookups))
 
     if kind == NONPROFIT:
         return result(NO_SINGLE_HOST, "nonprofit_no_site_named")
@@ -470,15 +729,23 @@ class HostLinkCandidates(pa.DataFrameModel):
         unique = ["fain", "host_kind", "host_id"]
 
 
-def grant_facts(grants: pl.DataFrame, actions: pl.DataFrame) -> list[GrantFacts]:
-    """Linker input per Grant: Recipient from the Grant table, business types from its latest action."""
-    business_types = (
+def grant_facts(
+    grants: pl.DataFrame, actions: pl.DataFrame, ed_list_rows: pl.DataFrame | None = None
+) -> list[GrantFacts]:
+    """Linker input per Grant: Recipient and start year from the Grant table; business types,
+    city and ZIP from its latest action; its distinct award descriptions; and the "Recipient/
+    campus" text of its latest ED TRIO list row (cleaned `ed_trio_list_rows`), by exact FAIN."""
+    latest = (
         actions.sort(
             "action_date", pl.col("modification_number").cast(pl.Int64, strict=False),
             descending=True, nulls_last=True,
         )
         .group_by("fain", maintain_order=True)
-        .agg(pl.col("business_types").drop_nulls().first())
+        .agg(
+            pl.col("business_types").drop_nulls().first(),
+            pl.col("recipient_city").drop_nulls().first(),
+            pl.col("recipient_zip").drop_nulls().first(),
+        )
     )
     descriptions = (
         actions.select("fain", description=pl.concat_list("transaction_description", "base_transaction_description"))
@@ -490,10 +757,20 @@ def grant_facts(grants: pl.DataFrame, actions: pl.DataFrame) -> list[GrantFacts]
         .agg("description")
     )
     rows = (
-        grants.select("fain", "recipient_name", "recipient_uei", "recipient_state")
-        .join(business_types, on="fain", how="left")
+        grants.select(
+            "fain", "recipient_name", "recipient_uei", "recipient_state",
+            pl.col("project_start").dt.year().alias("start_year"),
+        )
+        .join(latest, on="fain", how="left")
         .join(descriptions, on="fain", how="left")
     )
+    if ed_list_rows is not None and ed_list_rows.height:
+        ed = (
+            ed_list_rows.sort("fiscal_year", "list_row_id", descending=True)
+            .group_by("fain", maintain_order=True)
+            .agg(pl.col("recipient_campus").first().alias("ed_recipient_campus"), pl.col("ed_campus").first())
+        )
+        rows = rows.join(ed, on="fain", how="left")
     return [
         GrantFacts(**{k: v for k, v in r.items() if k != "description"}, descriptions=tuple(r["description"] or ()))
         for r in rows.iter_rows(named=True)
@@ -501,10 +778,10 @@ def grant_facts(grants: pl.DataFrame, actions: pl.DataFrame) -> list[GrantFacts]
 
 
 def build_host_links(
-    grants: pl.DataFrame, actions: pl.DataFrame, lookups: HostLookups
+    grants: pl.DataFrame, actions: pl.DataFrame, lookups: HostLookups, ed_list_rows: pl.DataFrame | None = None
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Link every Grant; returns (host_links, host_link_candidates). One link per Grant-table row."""
-    links = [link_host(facts, lookups) for facts in grant_facts(grants, actions)]
+    links = [link_host(facts, lookups) for facts in grant_facts(grants, actions, ed_list_rows)]
     link_rows = pl.DataFrame(
         [
             {
