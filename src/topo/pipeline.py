@@ -24,7 +24,8 @@ from topo.domain.grant_universe import (
     build_grant_universe,
     build_lookback,
 )
-from topo.domain.host_linking import HostLookups, build_host_links
+from topo.domain.host_linking import UNITID, HostLookups, build_host_links
+from topo.domain.local_context import build_local_context, locate_campus_districts
 from topo.domain.succession import (
     LookbackSettings,
     build_successions,
@@ -35,8 +36,9 @@ from topo.domain.succession import (
 from topo.fiscal import ReportingWindow
 from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
+from topo.outputs.match_quality_context import build_context_section, write_context_section_csv
 from topo.outputs.target_list import build_target_list, write_target_list_csv
-from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
+from topo.sources import SOURCES, ccd, ed_grantee_lists, edge, ipeds, saipe, usaspending
 
 RUN_CONTEXT = "run_context.json"
 DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
@@ -53,6 +55,9 @@ COHORT_STARTS = "cohort_starts"  # (Program, competition FY): Cohort start date,
 GRANT_COHORTS = "grant_cohorts"  # one row per in-window or lookback FAIN
 SUCCESSIONS = "successions"  # fain -> successor_fain: same Recipient, Program and Host institution
 HAND_OFFS = "hand_offs"  # full negative matched by a same-day same-amount A1 on another FAIN of the Program
+# Local context (#38).
+CAMPUS_DISTRICTS = "campus_districts"  # (UNITID, LEAID): every district a college Host's campus lies in
+LOCAL_CONTEXT = "local_context"  # one row per FAIN: context via the Host, each field with its data year
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,7 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     host_links.write_parquet(config.layout.joined_table(HOST_LINKS))
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     successors = _join_succession(config, universe, actions, host_links, lookups)
+    _join_local_context(config, host_links, pull_date)
     _join_funding_status(config, universe, context, successors)
     _join_ed_lists(config, universe, actions, pull_date)
     (joined / RUN_CONTEXT).write_text(context.to_json())
@@ -164,6 +170,39 @@ def _join_succession(
     for name, frame in tables.items():
         frame.write_parquet(config.layout.joined_table(name))
     return successor_fains(successions, hand_offs)
+
+
+def _join_local_context(config: Config, host_links: pl.DataFrame, pull_date: dt.date) -> None:
+    """Campus districts of college Hosts and one Local context row per Grant, via its Host only."""
+    colleges = host_links.filter(pl.col("host_kind") == UNITID)["host_id"].unique()
+    points = edge.read_geocodes(config).filter(pl.col("unitid").is_in(colleges.implode()))
+    polygons = config.layout.cleaned_table(edge.DISTRICTS_TABLE)
+    campus_districts = locate_campus_districts(points, polygons if polygons.exists() else None)
+    context = build_local_context(
+        host_links,
+        ipeds_directory=ipeds.read_directory(config),
+        ipeds_enrollment=ipeds.read_enrollment(config),
+        lea_directory=ccd.read_lea_directory(config),
+        campus_districts=campus_districts,
+        saipe=saipe.read_school_districts(config),
+    )
+    inputs = [
+        config.layout.cleaned_table(name)
+        for name in (
+            ipeds.DIRECTORY_TABLE, ipeds.ENROLLMENT_TABLE, ccd.LEA_DIRECTORY_TABLE, edge.GEOCODES_TABLE,
+            edge.DISTRICTS_TABLE, saipe.TABLE,
+        )
+    ]
+    run_log.record(
+        config, layer="join", source=LOCAL_CONTEXT, rows_in=host_links.height, rows_out=context.height,
+        drops={}, pull_date=pull_date,
+        input_hash=provenance.combined_hash(
+            f"{p.name} {provenance.file_sha256(p)}" for p in [config.layout.joined_table(HOST_LINKS), *inputs]
+            if p.exists()
+        ),
+    )
+    campus_districts.write_parquet(config.layout.joined_table(CAMPUS_DISTRICTS))
+    context.write_parquet(config.layout.joined_table(LOCAL_CONTEXT))
 
 
 def _join_funding_status(
@@ -244,24 +283,31 @@ def read_joined(config: Config) -> tuple[RunContext, GrantUniverse]:
 @dataclass(frozen=True)
 class Delivered:
     target_list_csv: Path
+    match_quality_context_csv: Path
 
 
 def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
-    rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
+    local_context = pl.read_parquet(config.layout.joined_table(LOCAL_CONTEXT))
+    rows = build_target_list(
+        universe, context.as_of, host_links=host_links, funding=funding, local_context=local_context
+    )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
         drops={}, pull_date=context.pull_date,
         input_hash=provenance.combined_hash(
             provenance.file_sha256(config.layout.joined_table(name))
-            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS, LOCAL_CONTEXT)
         ),
     )
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
     provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
-    return Delivered(target_list_csv=path)
+    reasons = build_context_section(local_context)
+    reasons_path = write_context_section_csv(reasons, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, reasons_path, as_of=context.as_of, pull_date=context.pull_date)
+    return Delivered(target_list_csv=path, match_quality_context_csv=reasons_path)
 
 
 def run(config: Config, as_of: dt.date | None = None) -> Delivered:

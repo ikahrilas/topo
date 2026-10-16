@@ -5,8 +5,10 @@ obligations by action-date federal fiscal year, labelled "FY2025", never by
 academic year. Funding status, Latest readable status, Readable from,
 Lifecycle stage and the 2025–26 disruption marker come from the Funding status
 reader (#31). Host institution, Host ID, Host confidence and Case label come
-from Host linking (#32). Later tickets add columns (Priority tier, Local
-context) and the XLSX workbook.
+from Host linking (#32). Local context
+(institution type, enrollment, the Host's or Campus district's poverty rate,
+each with its data year, and a reason code when null) comes from #38. Later
+tickets add Priority tier and the XLSX workbook.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from pathlib import Path
 import polars as pl
 
 from topo.domain.grant_universe import GrantUniverse
+from topo.domain.local_context import CAMPUS_DISTRICT, LocalContext
 from topo.fiscal import fy_label
 from topo.guards import StructuralBreak
 from topo.outputs.delivery import delivery_path, write_new
@@ -33,18 +36,52 @@ FUNDING_COLUMNS = {  # joined grant_funding_status column -> display column
 }
 
 
+POVERTY_BASIS = {CAMPUS_DISTRICT: "Campus district", "host_district": "Host district"}
+
+LOCAL_CONTEXT_COLUMNS = {  # joined local_context column -> display column (built in _local_context)
+    "institution_type": "Institution type",
+    "institution_type_year": "Institution type year",
+    "enrollment": "Enrollment",
+    "enrollment_year": "Enrollment year",
+    "poverty_rate_5_17": "Poverty rate (ages 5-17)",
+    "poverty_rate_of": "Poverty rate of",
+    "poverty_rate_year": "Poverty rate year",
+    "campus_district_year": "Campus district year",
+    "campus_district_overlap": "Campus district overlap",
+    "context_reason": "Context reason",
+}
+
+
+def _local_context(local_context: pl.DataFrame | None) -> pl.DataFrame:
+    """Display columns of Local context; the poverty rate is labelled by whose district it is."""
+    if local_context is None:
+        local_context = pl.DataFrame(
+            schema={name: col.dtype.type for name, col in LocalContext.to_schema().columns.items()}
+        )
+    return local_context.select(
+        "fain",
+        *(pl.col(src).alias(shown) for src, shown in LOCAL_CONTEXT_COLUMNS.items() if src != "poverty_rate_of"),
+        pl.concat_str(
+            pl.col("poverty_rate_basis").replace_strict(POVERTY_BASIS, default=None),
+            pl.lit(": "), "poverty_district_name", pl.lit(" (LEAID "), "poverty_district_leaid", pl.lit(")"),
+        ).alias("Poverty rate of"),
+    )
+
+
 def build_target_list(
     universe: GrantUniverse,
     as_of: dt.date,
     *,
     host_links: pl.DataFrame,
     funding: pl.DataFrame | None = None,
+    local_context: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """The target-list rows, in display column order.
 
     `host_links` is the joined Host-links table (topo.domain.host_linking.HostLinks),
     one row per FAIN; the Host sits next to the Recipient name and UEI.
     `funding` is the joined grant_funding_status table (one row per FAIN).
+    `local_context` is the joined local_context table (topo.domain.local_context.LocalContext).
     """
     if funding is None:
         funding = pl.DataFrame(schema={"fain": pl.String, **{c: pl.String for c in FUNDING_COLUMNS}})
@@ -87,6 +124,7 @@ def build_target_list(
         .join(latest, on="fain", how="left")
         .join(wide.select("fain", *labels), on="fain", how="left")
         .join(funding.select("fain", *FUNDING_COLUMNS), on="fain", how="left")
+        .join(_local_context(local_context), on="fain", how="left")
         .with_columns(pl.col(labels).fill_null(0.0), pl.col("Cumulative obligation").fill_null(0.0))
         .sort("recipient_state", "program", "fain", nulls_last=True)
         .select(
@@ -106,6 +144,7 @@ def build_target_list(
             "Cumulative obligation",
             *labels,
             *(pl.col(src).alias(shown) for src, shown in FUNDING_COLUMNS.items()),
+            *LOCAL_CONTEXT_COLUMNS.values(),
             pl.col("pull_date").alias("Pull date"),
             pl.lit(as_of).alias("As-of date"),
         )
