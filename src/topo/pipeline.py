@@ -14,18 +14,20 @@ from pathlib import Path
 
 import polars as pl
 
+from topo import provenance, run_log
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
 from topo.domain.ed_lists import join_ed_lists
 from topo.domain.funding_status import ReadWindows, read_grants_funding_status
-from topo.domain.grant_universe import GrantUniverse, build_grant_universe
+from topo.domain.grant_universe import EXCEPTION_UNKNOWN_FAIN_PREFIX, GrantUniverse, build_grant_universe
 from topo.domain.host_linking import HostLookups, build_host_links
 from topo.fiscal import ReportingWindow
-from topo.guards import StructuralBreak
+from topo.guards import StructuralBreak, check_layer_handoff, warn
 from topo.outputs.funding_status_history import append_funding_status_history
 from topo.outputs.target_list import build_target_list, write_target_list_csv
 from topo.sources import SOURCES, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
+DROP_OUTSIDE_WINDOW = "grant_outside_reporting_window"
 JOINED_TABLES = ("grants", "grant_actions", "fy_obligations", "grant_universe_exceptions")
 HOST_LINKS = "host_links"  # one row per FAIN: outcome, Case label, Host, Host confidence
 HOST_LINK_CANDIDATES = "host_link_candidates"  # (FAIN, candidate) with its signals
@@ -77,11 +79,16 @@ def clean(config: Config, source: str, pull_date: dt.date | None = None) -> pl.D
 def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, GrantUniverse]:
     as_of = resolve_as_of(config, as_of)
     actions = usaspending.read_cleaned(config)
+    check_layer_handoff(
+        "join", actions.height, "clean", run_log.last_rows_out(config, "clean", usaspending.SOURCE),
+        usaspending.SOURCE,
+    )
     window = ReportingWindow.ending_before(config.reporting_window_start_fy, as_of)
     universe = build_grant_universe(actions, window)
     pull_dates = actions["pull_date"].unique().to_list()
     pull_date = max(pull_dates) if pull_dates else usaspending.latest_pull_date(config.layout)
     context = RunContext(as_of=as_of, pull_date=pull_date, window=window)
+    _log_join(config, actions, universe, pull_date)
 
     joined = config.layout.joined
     joined.mkdir(parents=True, exist_ok=True)
@@ -98,6 +105,24 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     _join_ed_lists(config, universe, actions)
     (joined / RUN_CONTEXT).write_text(context.to_json())
     return context, universe
+
+
+def _log_join(config: Config, actions: pl.DataFrame, universe: GrantUniverse, pull_date: dt.date) -> None:
+    """Run-log the join: every cleaned action is a Grant action, an exception, or outside the window."""
+    exceptions = universe.exceptions.height
+    outside = actions.filter(
+        ~pl.col("fain").is_in(universe.grants["fain"].implode())
+        & ~pl.col("transaction_key").is_in(universe.exceptions["transaction_key"].implode())
+    ).height
+    if exceptions:
+        warn(f"{exceptions} actions in grant_universe_exceptions ({EXCEPTION_UNKNOWN_FAIN_PREFIX})")
+    run_log.record(
+        config, layer="join", source="grant_universe", rows_in=actions.height,
+        rows_out=universe.grant_actions.height,
+        drops={EXCEPTION_UNKNOWN_FAIN_PREFIX: exceptions, DROP_OUTSIDE_WINDOW: outside},
+        pull_date=pull_date,
+        input_hash=provenance.file_sha256(config.layout.cleaned_table(usaspending.CLEANED_TABLE)),
+    )
 
 
 def _join_funding_status(config: Config, universe: GrantUniverse, context: RunContext) -> None:
@@ -150,7 +175,16 @@ def report(config: Config) -> Delivered:
     host_links = pl.read_parquet(config.layout.joined_table(HOST_LINKS))
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     rows = build_target_list(universe, context.as_of, host_links=host_links, funding=funding)
+    run_log.record(
+        config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
+        drops={}, pull_date=context.pull_date,
+        input_hash=provenance.combined_hash(
+            provenance.file_sha256(config.layout.joined_table(name))
+            for name in (*JOINED_TABLES, HOST_LINKS, GRANT_FUNDING_STATUS)
+        ),
+    )
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     return Delivered(target_list_csv=path)
 
 

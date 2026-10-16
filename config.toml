@@ -63,3 +63,9 @@ disruption_window_end = 2026-09-30
 # Erring short avoids calling a planned final year "unfunded".
 TRIO = 5
 "GEAR UP" = 6
+
+[api_keys]
+# Environment variables holding API keys (never the keys themselves). Set them in
+# the shell or in a .env file beside this one; .env is git-ignored. Only the
+# Census API takes a key.
+census = "CENSUS_API_KEY"
