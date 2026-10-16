@@ -63,6 +63,8 @@ from topo.outputs.target_list import (
 from topo.outputs.reconciliation import write_evidence_csv, write_reconciliation_csv
 from topo.outputs.match_quality import MatchQualityInputs, render_match_quality, write_match_quality
 from topo.outputs.review_queue import build_review_queue, write_review_queue_csv
+from topo.review_findings import last_founder_marks, read_review_findings, spot_check_summary
+from topo.outputs.spot_check import SpotCheckSettings, write_spot_check
 from topo.sources import SOURCES, ccd, ed_grantee_lists, ipeds, usaspending
 
 RUN_CONTEXT = "run_context.json"
@@ -391,6 +393,7 @@ class Delivered:
     review_queue_csv: Path
     match_quality: Path
     reconciliation_csv: Path
+    spot_check: Path
 
 
 def report(config: Config) -> Delivered:
@@ -399,11 +402,13 @@ def report(config: Config) -> Delivered:
     funding = pl.read_parquet(config.layout.joined_table(GRANT_FUNDING_STATUS))
     funding_periods = pl.read_parquet(config.layout.joined_table(FUNDING_STATUS))
     cause_notes = read_cause_notes(config.layout.curated / CAUSE_NOTES_FILE)
+    findings = read_review_findings(config)
     settings = TargetListSettings.from_section(config.section("target_list"))
     rows = build_target_list(
         universe, context.as_of, host_links=host_links, funding=funding, funding_periods=funding_periods,
         cause_notes=cause_notes, pull_date=context.pull_date, settings=settings,
         timing=pl.read_parquet(config.layout.joined_table(RENEWAL_TIMING)),
+        founder_marks=last_founder_marks(findings),
     )
     run_log.record(
         config, layer="report", source="target_list", rows_in=universe.grants.height, rows_out=rows.height,
@@ -422,7 +427,10 @@ def report(config: Config) -> Delivered:
         awaited=awaited_notes(universe, settings),
     )
     files = write_target_list(rows, readme, config.layout.output)
-    for path in (files.xlsx, files.csv):
+    spot_check = write_spot_check(
+        rows, readme, SpotCheckSettings.from_section(config.section("spot_check")), config.layout.output
+    )
+    for path in (files.xlsx, files.csv, spot_check):
         provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     candidates = pl.read_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))
     lookback_grants = pl.read_parquet(config.layout.joined_table(LOOKBACK_GRANTS))
@@ -445,6 +453,7 @@ def report(config: Config) -> Delivered:
             answer_key_rows=curated.read_answer_key(config).height,
             tuning_set_rows=curated.read_tuning_set(config).height,
             input_hashes=_input_hashes(config),
+            founder_spot_check=spot_check_summary(findings),
         )
     )
     quality_path = write_match_quality(quality, config.layout.output, context.pull_date)
@@ -453,6 +462,7 @@ def report(config: Config) -> Delivered:
     return Delivered(
         target_list_csv=files.csv, target_list_xlsx=files.xlsx, review_queue_csv=queue_path, match_quality=quality_path,
         reconciliation_csv=reconciliation_csv,
+        spot_check=spot_check,
     )
 
 

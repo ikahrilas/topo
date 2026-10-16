@@ -43,6 +43,7 @@ ENDED_SHEET = "Ended"
 MISSING_SHEET = "Missing"
 README_SHEET = "README"
 MISSING_COLUMNS = ("State", "Recipient", "Program", "Note")
+LAST_FOUNDER_MARK = "Last founder mark"  # the latest Review finding on the FAIN, read-only
 
 FUNDING_COLUMNS = {  # joined grant_funding_status column -> display column
     "funding_status": "Funding status",
@@ -87,7 +88,9 @@ GLOSSARY = (
                            "\"timing not predicted\" when the Program's cycle isn't 60 months, and for GEAR UP."),
     ("End date", "GEAR UP only: the Grant's expected end, when it falls within the lead time. An end date, "
                  "not a due date."),
-    ("Cause note","Shown only where a cited public source names the Grant's FAIN."),
+    ("Cause note", "Shown only where a cited public source names the Grant's FAIN."),
+    ("Last founder mark", "The founder's latest spot-check mark on the FAIN (ok, wrong or stale, with the field "
+                          "and note). Read-only; a mark never changes any other field by itself."),
     ("Pull date", "The date the source data was fetched."),
     ("As-of date", "The date the data is read as of; Funding status is judged against it."),
 )
@@ -168,6 +171,7 @@ def build_target_list(
     pull_date: dt.date | None = None,
     settings: TargetListSettings = TargetListSettings(),
     timing: pl.DataFrame | None = None,
+    founder_marks: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """Every target-list row (main and Ended sheets), sorted, in display column order.
 
@@ -176,6 +180,8 @@ def build_target_list(
     joined funding_status table (one row per FAIN and Budget period). `cause_notes`
     is the curated cause-notes table (topo.domain.cause_notes). `timing` is the
     joined renewal_timing table (topo.domain.renewal_timing, one row per FAIN).
+    is the curated cause-notes table (topo.domain.cause_notes). `founder_marks` holds
+    "Last founder mark" per FAIN (topo.review_findings.last_founder_marks), read-only.
     """
     if funding is None:
         funding = pl.DataFrame(schema={"fain": pl.String, **{c: pl.String for c in FUNDING_COLUMNS}})
@@ -229,6 +235,7 @@ def build_target_list(
         .join(_latest_readable_periods(funding_periods), on="fain", how="left")
         .join(notes, on="fain", how="left")
         .join(timing, on="fain", how="left")
+        .join(_founder_marks(founder_marks), on="fain", how="left")
         .with_columns(pl.col(labels).fill_null(0.0), pl.col("Cumulative obligation").fill_null(0.0))
     )
     rows = rows.with_columns(
@@ -273,6 +280,7 @@ def build_target_list(
             "Cumulative obligation",
             *labels,
             pl.col("data_note").alias("Data note"),
+            LAST_FOUNDER_MARK,
             pl.col("pull_date").alias("Pull date"),
             pl.lit(as_of).alias("As-of date"),
         )
@@ -297,6 +305,10 @@ def _timing_columns(timing: pl.DataFrame | None) -> pl.DataFrame:
         "timing",
         "end_date_fact",
     )
+def _founder_marks(marks: pl.DataFrame | None) -> pl.DataFrame:
+    if marks is None:
+        return pl.DataFrame(schema={"fain": pl.String, LAST_FOUNDER_MARK: pl.String})
+    return marks.select("fain", LAST_FOUNDER_MARK)
 
 
 def _award_dates(grant_actions: pl.DataFrame) -> pl.DataFrame:

@@ -5,8 +5,9 @@ sample size and gating; overrides in force; review and unmatched lists by FAIN;
 Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
 with no UEI; breakdowns by Program and by start year; Pull date, As-of date and
 input hashes. Dollars are obligations over the reporting-window fiscal years.
-Later tickets add the renewal-timing backtest, the observed-gap table, context
-reason codes and the founder spot-check block.
+The founder spot-check block counts Review findings by review date, apart from
+the answer key. Later tickets add the renewal-timing backtest, the observed-gap
+table and context reason codes.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ class MatchQualityInputs:
     answer_key_rows: int
     tuning_set_rows: int
     input_hashes: list[tuple[str, str]]  # (path, sha256)
+    founder_spot_check: pl.DataFrame | None = None  # topo.review_findings.spot_check_summary
 
 
 def _money(value: float | None) -> str:
@@ -208,9 +210,26 @@ def render_match_quality(inputs: MatchQualityInputs) -> str:
     out += ["", "## By start year", "", "Fiscal year of the Grant's project start.", ""]
     out += _table(["Start FY", *header], _outcome_counts(by_year, "start_fy"))
 
+    out += _founder_spot_check(inputs.founder_spot_check)
+
     out += ["", "## Inputs", ""]
     out += _table(["Input", "SHA-256"], [[path, sha] for path, sha in inputs.input_hashes])
     return "\n".join(out) + "\n"
+
+
+def _founder_spot_check(summary: pl.DataFrame | None) -> list[str]:
+    """The founder spot-check block: Review findings by review date, apart from the answer key."""
+    out = [
+        "",
+        "## Founder spot-check",
+        "",
+        "Review findings from the founder's spot checks, by review date. They are kept apart from the answer "
+        "key, never scored in the accuracy above, and never change an override by themselves.",
+    ]
+    if summary is None or not summary.height:
+        return out + ["", "No Review findings yet."]
+    out.append("")
+    return out + _table(list(summary.columns), [list(r) for r in summary.iter_rows()])
 
 
 def write_match_quality(text: str, output_dir: Path, pull_date: dt.date) -> Path:
