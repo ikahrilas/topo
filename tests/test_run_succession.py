@@ -102,5 +102,104 @@ def test_lookback_reaches_back_to_fy2010_for_trio_and_fy2015_for_gear_up(project
     assert [r["FAIN"] for r in project.read_csv(f"target_list_{PULL}.csv")] == ["P042A200005"]
 
 
+def mcnair_a1(fain, year):
+    return action(fain, 1, f"{year}-07-01", 250000, (f"{year}-10-01", f"{year + 1}-09-30"), action_type="A1", **ROCKY)
+
+
+def test_cohort_starts_are_derived_per_program_and_off_cycle_awards_join_the_cohort_before_them(project):
+    write_actions(project.raw_usaspending, PULL, [
+        *[a for n in (1, 2, 3) for a in five_years(f"P042A15000{n}", "2015-07-01", 2015, **ROCKY)],
+        *five_years("P042A160004", "2016-07-01", 2016, **ROCKY),  # off-cycle: from the unfunded list
+        *[a for n in (5, 6, 7) for a in five_years(f"P042A20000{n}", "2020-07-01", 2020, **ROCKY)],
+        mcnair_a1("P217A170001", 2017), mcnair_a1("P217A170002", 2017),
+        mcnair_a1("P217A220003", 2022), mcnair_a1("P217A220004", 2022),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    assert joined(project, "cohort_starts").rows() == [
+        ("McNair", 2017, d("2017-10-01"), 2),
+        ("McNair", 2022, d("2022-10-01"), 2),
+        ("Student Support Services", 2015, d("2015-09-01"), 3),
+        ("Student Support Services", 2020, d("2020-09-01"), 3),
+    ]
+    cohorts = dict(joined(project, "grant_cohorts").select("fain", "cohort_fy").rows())
+    assert cohorts["P042A160004"] == 2015
+    assert cohorts["P042A200005"] == 2020
+    assert cohorts["P217A170001"] == 2017
+
+
+def who(recipient, uei, state):
+    return dict(recipient=recipient, uei=uei, state=state)
+
+
+def funded_then_handed_off(old, new, period, start_year, a1_date, amount, hand_off_date, old_who, new_who):
+    """The old FAIN is funded on time each year; on the hand-off date its last Continuation (or A1) is
+    negated in full and the new FAIN's A1 for the same amount is made the same day."""
+    years = list(range(start_year, 2026))
+    last = years[-1]
+    start_md, end_md = period
+    actions = [
+        action(old, i + 1, a1_date if i == 0 else f"{y}-06-01", amount,
+               (f"{y}-{start_md}", f"{y + 1}-{end_md}"), action_type="A1" if i == 0 else "B1",
+               **old_who)
+        for i, y in enumerate(years)
+    ]
+    actions.append(action(old, 99, hand_off_date, -amount, (f"{last}-{start_md}", f"{last + 1}-{end_md}"),
+                          action_type="EX", **old_who))
+    actions.append(action(new, 1, hand_off_date, amount, (hand_off_date, f"{int(hand_off_date[:4]) + 1}-06-30"),
+                          action_type="A1", **new_who))
+    return actions
+
+
+SEPT, OCT = ("09-01", "08-31"), ("10-01", "09-30")  # Budget period start and end (month-day)
+SIENA = who("SIENA HEIGHTS UNIVERSITY", "SIENAUEI0001", "MI")
+KNOWN_HAND_OFFS = [  # docs/research/status-signals-2025-26.md, "Succession false positives"
+    funded_then_handed_off("P047A221031", "P047A250002", SEPT, 2022, "2022-07-01", 513114, "2025-12-22",
+                           who("IMPACT EDUCATIONAL AND HOUSING DEVELOPMENT", "IMPACTUEI001", "GA"),
+                           who("IMPACT PROSPERITY PARTNERS", "IMPACTUEI002", "GA")),
+    funded_then_handed_off("P217A220158", "P217A250002", OCT, 2022, "2022-07-01", 92117.37, "2026-06-15",
+                           SIENA, who("ADRIAN COLLEGE", "ADRIANUEI001", "MI")),
+    funded_then_handed_off("P042A250822", "P042A251923", SEPT, 2025, "2025-07-01", 202423.49, "2026-07-06",
+                           SIENA, who("DEFIANCE COLLEGE", "DEFIANCEUEI1", "OH")),
+    funded_then_handed_off("P042A250292", "P042A251922", SEPT, 2025, "2025-07-01", 272364, "2026-06-24",
+                           who("PURDUE UNIVERSITY GLOBAL", "PURDUEGLOBL1", "IN"),
+                           who("PURDUE UNIVERSITY", "PURDUEUEI001", "IN")),
+]
+
+IVY = who("IVY TECH COMMUNITY COLLEGE", "IVYTECHUEI01", "IN")
+REVERSED_DESPITE_A1_ON_ANOTHER_PROGRAM = [
+    action("P044A210683", 1, "2021-06-01", 336357, ("2021-09-01", "2022-08-31"), action_type="A1", **IVY),
+    *[action("P044A210683", y - 2020, f"{y}-06-01", 336357, (f"{y}-09-01", f"{y + 1}-08-31"), **IVY)
+      for y in range(2022, 2026)],
+    action("P044A210683", 9, "2025-09-29", -336357, ("2025-09-01", "2026-08-31"), action_type="EX", **IVY),
+    # Same day, same amount, but SSS, not Talent Search: not a hand-off.
+    action("P042A259999", 1, "2025-09-29", 336357, ("2025-10-01", "2026-09-30"), action_type="A1",
+           **who("ANOTHER COLLEGE", "ANOTHERUEI01", "IN")),
+]
+
+HANDED_OFF = ["P042A250292", "P042A250822", "P047A221031", "P217A220158"]
+
+
+def test_the_four_known_succession_hand_offs_are_not_read_as_reversed(project):
+    write_actions(project.raw_usaspending, PULL,
+                  [a for grant in KNOWN_HAND_OFFS for a in grant] + REVERSED_DESPITE_A1_ON_ANOTHER_PROGRAM)
+
+    project.topo("run", "--as-of", PULL)
+
+    status = {r["FAIN"]: r["Latest readable status"] for r in project.read_csv(f"target_list_{PULL}.csv")}
+    assert {fain: status[fain] for fain in HANDED_OFF} == dict.fromkeys(HANDED_OFF, "continued")
+    assert status["P044A210683"] == "reversed"
+    periods = joined(project, "funding_status").filter(pl.col("fain").is_in(HANDED_OFF))
+    assert "reversed" not in periods["funding_status"].to_list()
+    assert sorted(joined(project, "hand_offs").select("fain", "successor_fain").rows()) == [
+        ("P042A250292", "P042A251922"),
+        ("P042A250822", "P042A251923"),
+        ("P047A221031", "P047A250002"),
+        ("P217A220158", "P217A250002"),
+    ]
+    assert successions(project) == []  # different Recipients: hand-offs, not Successions
+
+
 def d(text: str) -> dt.date:
     return dt.date.fromisoformat(text)
