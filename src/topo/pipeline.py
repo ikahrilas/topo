@@ -98,7 +98,8 @@ def join(config: Config, as_of: dt.date | None = None) -> tuple[RunContext, Gran
     universe.fy_obligations.write_parquet(config.layout.joined_table("fy_obligations"))
     universe.exceptions.write_parquet(config.layout.joined_table("grant_universe_exceptions"))
     host_links, host_link_candidates = build_host_links(
-        universe.grants, actions, HostLookups.from_directory(ipeds.read_directory(config))
+        universe.grants, actions, HostLookups.from_directory(ipeds.read_directory(config)),
+        ed_grantee_lists.read_cleaned(config, ed_grantee_lists.TRIO_TABLE),
     )
     host_links.write_parquet(config.layout.joined_table(HOST_LINKS))
     host_link_candidates.write_parquet(config.layout.joined_table(HOST_LINK_CANDIDATES))

@@ -208,6 +208,15 @@ def test_campus_words_never_reach_a_non_sibling():
     assert candidates(link) == {("204796", ("name", "uei"))}
 
 
+def test_campus_words_never_tell_apart_two_colleges_that_are_not_siblings():
+    # 'CORLEY' tells Dothan from Selma, but the two Wallace colleges are not one campus family:
+    # the description's name for Dothan is a description phrase, which never overrides the UEI.
+    link = link_host(grant("P044A220016", "GEORGE CORLEY WALLACE STATE COMMUNITY COLLEGE", "AL", "WALLACEUEI01",
+                           desc="GEORGE CORLEY WALLACE STATE COMMUNITY COLLEGE PROJECT"), LOOKUPS)
+    assert (link.outcome, link.case_label, link.host_id) == ("review", "campus_text_overrides_uei", "101295")
+    assert candidates(link) == {("101301", ("uei",)), ("101295", ("desc", "name"))}
+
+
 @pytest.mark.parametrize("desc, state, unitid", [
     ("SSS AT WEST HILLS COLLEGE LEMOORE", "CA", "120971"),  # a former name
     ("TRI-C UPWARD BOUND", "OH", "202134"),  # an IPEDS alias

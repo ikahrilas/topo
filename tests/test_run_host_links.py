@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import polars as pl
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, enrollment_row, write_csv
+from support.ed_lists import file_list, pdf_bytes, trio_pdf_lines, write_manifest
 from support.usaspending import action, write_actions
 
 PULL = "2026-10-07"
@@ -91,3 +92,46 @@ def test_without_an_ipeds_pull_every_grant_stays_on_the_target_list(project):
     assert len(rows) == len(GRANTS)
     assert rows["P042A250001"]["Host confidence"] == "unmatched"
     assert rows["P334S250004"]["Case label"] == "gearup_state"
+
+
+def test_ed_list_text_descriptions_addresses_and_start_years_reach_the_linker(project):
+    """The run feeds the linker the ED list text by exact FAIN, the award descriptions, the
+    Recipient's city and ZIP from the latest action, and the Grant's start year."""
+    write_actions(project.raw_usaspending, PULL, [
+        # Los Rios: the ED list names American River College, the description Sacramento City College
+        one_year("P047A250011", "LOS RIOS COMMUNITY COLLEGE DISTRICT", "LOSRIOSUEI01", "CA", IHE,
+                 transaction_description="UPWARD BOUND AT SACRAMENTO CITY COLLEGE"),
+        # Wallace: the UEI says Selma, the name says Dothan; the Recipient's address is in Selma
+        one_year("P042A250012", "GEORGE CORLEY WALLACE STATE COMMUNITY COLLEGE", "WALLACEUEI01", "AL", IHE,
+                 recipient_city_name="SELMA", recipient_zip_code="367021234",
+                 transaction_description="STUDENT SUPPORT SERVICES",
+                 prime_award_base_transaction_description="STUDENT SUPPORT SERVICES"),
+        # California University of Pennsylvania merged into PennWest before this Grant started
+        one_year("P042A250013", "CALIFORNIA UNIVERSITY OF PENNSYLVANIA", "CALUUEI00001", "PA", IHE),
+    ])
+    folder = project.root / "data" / "raw" / "ipeds" / PULL
+    write_csv(folder / "colleges_ipeds_directory.csv", DIRECTORY_COLUMNS, [
+        directory_row("109208", "American River College", "CA"),
+        directory_row("122180", "Sacramento City College", "CA"),
+        directory_row("101301", "George C Wallace State Community College-Selma", "AL", ueis=("WALLACEUEI01",),
+                      city="SELMA"),
+        directory_row("101295", "George Corley Wallace State Community College", "AL", city="DOTHAN"),
+        *[directory_row("211431", "California University of Pennsylvania", "PA", year=y, ueis=("CALUUEI00001",),
+                        newid="482680") for y in range(2018, 2022)],
+        *[directory_row("482680", "Pennsylvania Western University", "PA", year=y) for y in range(2022, 2025)],
+    ])
+    write_csv(folder / "colleges_ipeds_fall-enrollment-race_2024.csv", ENROLLMENT_COLUMNS, [])
+    lists = project.root / "data" / "raw" / "ed_grantee_lists"
+    write_manifest(lists, [file_list(lists, "ub_84047A", "2024", "ub.pdf", pdf_bytes(trio_pdf_lines(
+        2024, "Upward Bound(UB)",
+        [("P047A250011", "Los Rios Community College District/ American River College", "CA", 60, 300000)],
+    )))])
+
+    project.topo("run", "--as-of", PULL)
+
+    rows = by_fain(project.read_csv(f"target_list_{PULL}.csv"))
+    assert {fain: (r["Host ID"], r["Host confidence"], r["Case label"]) for fain, r in rows.items()} == {
+        "P047A250011": ("UNITID 109208", "matched", "ed_list_outranks_desc"),
+        "P042A250012": ("UNITID 101301", "matched", "uei_vs_name_conflict"),
+        "P042A250013": ("UNITID 482680", "matched", "uei_confirmed+followed_ipeds_merge"),
+    }

@@ -11,13 +11,18 @@ one HostLink out. The outcome is one of
 
 and the Case label names the rule that decided it. No numeric score.
 
-Rules in this module (#32): Recipient UEI -> IPEDS `ueis` and Recipient name ->
-IPEDS names (every name since `directory_from_year`, plus `inst_alias`), both
-restricted to the Recipient's state; IPEDS system offices (sector 0) never beat
-a real campus; the No single Host rules. Later tickets add the ED list name,
-award-description phrases, campus words, address tiebreaks, IPEDS merges
-(#35) and districts from CCD (#36). Case labels follow the prototype taxonomy
-(prototypes/host-linking/README.md).
+College signals, every one restricted to the Recipient's state (#32, #35):
+Recipient UEI -> IPEDS `ueis`; Recipient name -> IPEDS names (every name since
+`directory_from_year`, plus `inst_alias`); the ED list "Recipient/ campus" text
+(by exact FAIN) and award-description phrases -> IPEDS names, former names,
+aliases and generated acronyms; campus words, checked only against sibling
+campuses; and address (city or ZIP), which only tags candidates already found.
+ED text outranks the description. IPEDS merges resolve to the unit as of the
+Grant's start year, else the same-state surviving unit. IPEDS system offices
+(sector 0) never beat a real campus and alone go to review. Case labels follow
+the prototype taxonomy (prototypes/host-linking/README.md), with notes appended
+after "+": `followed_ipeds_merge`, `ipeds_unit_as_of_start_year`, `no_uei`.
+Districts from CCD come in #36.
 """
 
 from __future__ import annotations
@@ -266,11 +271,14 @@ class HostLookups:
         return frozenset(found)
 
     def siblings(self, state: str, uids: list[str]) -> frozenset[str]:
-        """The units plus same-state units sharing one's base name: a campus family. Not the IPEDS
-        system name, which whole state community-college systems share."""
-        family = set(uids)
+        """Same-state campus families of the units: units sharing a base name with at least one
+        other unit. Not the IPEDS system name, which whole state community-college systems share.
+        A unit with no sibling is in no family."""
+        family: set[str] = set()
         for uid in uids:
-            family |= self._by_base.get((state, base_key(self.units[uid].name)), frozenset())
+            group = self._by_base.get((state, base_key(self.units[uid].name)), frozenset())
+            if len(group) >= 2:
+                family |= group
         return frozenset(family)
 
     def as_of_start_year(self, uid: str, start_year: int | None, state: str) -> tuple[str | None, str | None]:
@@ -566,27 +574,55 @@ class HostLinkCandidates(pa.DataFrameModel):
         unique = ["fain", "host_kind", "host_id"]
 
 
-def grant_facts(grants: pl.DataFrame, actions: pl.DataFrame) -> list[GrantFacts]:
-    """Linker input per Grant: Recipient from the Grant table, business types from its latest action."""
-    business_types = (
+def grant_facts(
+    grants: pl.DataFrame, actions: pl.DataFrame, ed_list_rows: pl.DataFrame | None = None
+) -> list[GrantFacts]:
+    """Linker input per Grant: Recipient and start year from the Grant table; business types,
+    city and ZIP from its latest action; every distinct award description; and the "Recipient/
+    campus" text of its latest ED TRIO list row (cleaned `ed_trio_list_rows`), by exact FAIN."""
+    latest = (
         actions.sort(
             "action_date", pl.col("modification_number").cast(pl.Int64, strict=False),
             descending=True, nulls_last=True,
         )
         .group_by("fain", maintain_order=True)
-        .agg(pl.col("business_types").drop_nulls().first())
+        .agg(
+            pl.col("business_types").drop_nulls().first(),
+            pl.col("recipient_city").drop_nulls().first(),
+            pl.col("recipient_zip").drop_nulls().first(),
+        )
     )
-    rows = grants.select("fain", "recipient_name", "recipient_uei", "recipient_state").join(
-        business_types, on="fain", how="left"
+    descriptions = (
+        actions.unpivot(["transaction_description", "base_transaction_description"], index="fain")
+        .drop_nulls("value")
+        .unique(["fain", "value"])
+        .sort("fain", "value")
+        .group_by("fain", maintain_order=True)
+        .agg(pl.col("value").str.join(" || ").alias("description"))
     )
+    rows = (
+        grants.select(
+            "fain", "recipient_name", "recipient_uei", "recipient_state",
+            pl.col("project_start").dt.year().alias("start_year"),
+        )
+        .join(latest, on="fain", how="left")
+        .join(descriptions, on="fain", how="left")
+    )
+    if ed_list_rows is not None and ed_list_rows.height:
+        ed = (
+            ed_list_rows.sort("fiscal_year", "list_row_id", descending=True)
+            .group_by("fain", maintain_order=True)
+            .agg(pl.col("recipient_campus").first().alias("ed_recipient_campus"), pl.col("ed_campus").first())
+        )
+        rows = rows.join(ed, on="fain", how="left")
     return [GrantFacts(**r) for r in rows.iter_rows(named=True)]
 
 
 def build_host_links(
-    grants: pl.DataFrame, actions: pl.DataFrame, lookups: HostLookups
+    grants: pl.DataFrame, actions: pl.DataFrame, lookups: HostLookups, ed_list_rows: pl.DataFrame | None = None
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Link every Grant; returns (host_links, host_link_candidates). One link per Grant-table row."""
-    links = [link_host(facts, lookups) for facts in grant_facts(grants, actions)]
+    links = [link_host(facts, lookups) for facts in grant_facts(grants, actions, ed_list_rows)]
     link_rows = pl.DataFrame(
         [
             {
