@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 
+from topo import provenance
 from topo.config import LATEST_USASPENDING_PULL, Config, parse_date
 from topo.domain.grant_universe import GrantUniverse, build_grant_universe
 from topo.fiscal import ReportingWindow
@@ -111,6 +112,7 @@ def report(config: Config) -> Delivered:
     context, universe = read_joined(config)
     rows = build_target_list(universe, context.as_of)
     path = write_target_list_csv(rows, config.layout.output, context.pull_date)
+    provenance.write_sidecar(config, path, as_of=context.as_of, pull_date=context.pull_date)
     return Delivered(target_list_csv=path)
 
 

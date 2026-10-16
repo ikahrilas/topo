@@ -7,6 +7,8 @@ at the end of `clean` or `join`.
 
 from __future__ import annotations
 
+import warnings
+
 import polars as pl
 import pandera.errors
 import pandera.polars as pa
@@ -14,6 +16,15 @@ import pandera.polars as pa
 
 class StructuralBreak(Exception):
     """A break that stops the run. The CLI prints it and exits with code 2."""
+
+
+class RunWarning(UserWarning):
+    """A problem that does not stop the run. The CLI prints it as "Warning: ..."."""
+
+
+def warn(message: str) -> None:
+    """Report a non-structural problem; the run carries on."""
+    warnings.warn(RunWarning(message), stacklevel=2)
 
 
 def check_schema(schema: type[pa.DataFrameModel], frame: pl.DataFrame, table: str) -> pl.DataFrame:

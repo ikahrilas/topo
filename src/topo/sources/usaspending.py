@@ -24,6 +24,7 @@ from pathlib import Path
 import pandera.polars as pa
 import polars as pl
 
+from topo import provenance
 from topo.config import Config, Layout
 from topo.domain.programs import LISTINGS
 from topo.fiscal import fiscal_year
@@ -246,7 +247,9 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """Clean one USAspending pull (default: the latest) into the cleaned actions table."""
     layout = config.layout
     pull_date = pull_date or latest_pull_date(layout)
-    frames = [_read_raw_file(p) for p in raw_files(layout, pull_date)]
+    files = raw_files(layout, pull_date)
+    provenance.record_raw_inputs(config, SOURCE, files)
+    frames = [_read_raw_file(p) for p in files]
     frames = [f for f in frames if f.height]
     if frames:
         raw = pl.concat(frames)
