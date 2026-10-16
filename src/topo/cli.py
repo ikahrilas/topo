@@ -1,4 +1,4 @@
-"""The `topo` command line: pull <source>, clean <source>, join, report, run."""
+"""The `topo` command line: pull <source>, clean <source>, join, report, run, ingest-findings."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 
 import typer
 
-from topo import manifest, pipeline, provenance
+from topo import manifest, pipeline, provenance, review_findings
 from topo.config import Config, load_config
 from topo.guards import RunWarning, StructuralBreak
 from topo.sources import SOURCES
@@ -90,6 +90,22 @@ def pull(
         written = manifest.append(config, pulled_files)
         typer.echo(f"appended {written} rows to {manifest.manifest_path(config)}")
 
+    _guarded(go)
+
+
+@app.command("ingest-findings")
+def ingest_findings(
+    workbook: Path,
+    date: Annotated[str, typer.Option("--date", help="Date the founder reviewed the copy (YYYY-MM-DD).")],
+) -> None:
+    """Append the marks of a returned spot-check copy to data/curated/review_findings.csv."""
+
+    def go():
+        config = _config()
+        written = review_findings.ingest(config, workbook, dt.date.fromisoformat(date))
+        typer.echo(f"appended {written} Review findings to {review_findings.findings_path(config)}")
+
+    # Like `pull`, not under the dirty-tree guard: it writes a committed curated file you then commit.
     _guarded(go)
 
 

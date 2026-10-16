@@ -7,6 +7,7 @@ columns to the write-once Review findings file; later pulls show "Last founder m
 
 from __future__ import annotations
 
+import csv
 import shutil
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from support.usaspending import action, write_actions
 from support.workbook import read_sheet, sheet_names, sheet_text
 
 PULL = "2026-10-07"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 SPOT_CHECK = f"spot_check_{PULL}.xlsx"
 FINDINGS = Path("data") / "curated" / "review_findings.csv"
 IHE = "PUBLIC/STATE CONTROLLED INSTITUTION OF HIGHER EDUCATION"
@@ -129,3 +131,97 @@ def test_a_rerun_never_overwrites_a_delivered_spot_check_copy(project):
 
     assert (project.output / SPOT_CHECK).read_bytes() == first
     assert (project.output / f"spot_check_{PULL}_v2.xlsx").exists()
+
+
+def findings(project) -> list[dict[str, str]]:
+    with (project.root / FINDINGS).open(newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def returned(project, marks, **kw) -> Path:
+    return mark(project.output / SPOT_CHECK, project.root / "returned.xlsx", marks, **kw)
+
+
+def test_ingest_keeps_only_the_allowed_columns_with_reviewer_founder(project):
+    setup(project)
+    project.topo("run", "--as-of", PULL)
+    path = returned(
+        project,
+        {
+            "P042A250001": ("ok", None, None),
+            "P042A250004": ("wrong", "Host institution", "Runs at the Twin Cities campus"),
+            "P042A250005": ("stale", "Recipient", "Renamed in 2025"),
+        },
+        missing=[("MT", "Big Sky Tribal College", "Upward Bound", "Funded since 2022")],
+        extra_column=("Contact", "Jane Q. Person, 555-0100"),
+    )
+
+    project.topo("ingest-findings", str(path), "--date", "2026-10-20")
+
+    text = (project.root / FINDINGS).read_text()
+    assert text.splitlines()[0] == "fain,state,recipient,program,mark,field,note,date,reviewer"
+    assert "Jane Q. Person" not in text and "555-0100" not in text
+    rows = findings(project)
+    assert {r["reviewer"] for r in rows} == {"founder"}
+    assert {r["date"] for r in rows} == {"2026-10-20"}
+    by_key = {(r["fain"] or r["recipient"]): r for r in rows}
+    assert set(by_key) == {"P042A250001", "P042A250004", "P042A250005", "Big Sky Tribal College"}
+    assert by_key["P042A250004"] == {
+        "fain": "P042A250004", "state": "MN", "recipient": "", "program": "", "mark": "wrong",
+        "field": "Host institution", "note": "Runs at the Twin Cities campus", "date": "2026-10-20",
+        "reviewer": "founder",
+    }
+    assert by_key["Big Sky Tribal College"] == {
+        "fain": "", "state": "MT", "recipient": "Big Sky Tribal College", "program": "Upward Bound",
+        "mark": "missing", "field": "", "note": "Funded since 2022", "date": "2026-10-20", "reviewer": "founder",
+    }
+
+
+def test_the_findings_file_is_append_only_and_a_rerun_adds_nothing(project):
+    setup(project)
+    (project.root / FINDINGS).parent.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / FINDINGS, project.root / FINDINGS)  # the shipped, header-only file
+    project.topo("run", "--as-of", PULL)
+    first = returned(project, {"P042A250001": ("ok", None, None)})
+    project.topo("ingest-findings", str(first), "--date", "2026-10-20")
+    before = (project.root / FINDINGS).read_bytes()
+
+    project.topo("ingest-findings", str(first), "--date", "2026-10-20")
+    assert (project.root / FINDINGS).read_bytes() == before
+
+    second = mark(project.output / SPOT_CHECK, project.root / "second.xlsx",
+                  {"P042A250001": ("stale", "Project end", "Extended a year")})
+    project.topo("ingest-findings", str(second), "--date", "2026-11-02")
+    after = (project.root / FINDINGS).read_bytes()
+    assert after.startswith(before) and len(after) > len(before)
+    assert [(r["mark"], r["date"]) for r in findings(project)] == [("ok", "2026-10-20"), ("stale", "2026-11-02")]
+
+
+def test_ingest_refuses_a_mark_or_field_outside_the_lists_and_an_over_long_note(project):
+    setup(project)
+    project.topo("run", "--as-of", PULL)
+    for marks in (
+        {"P042A250001": ("maybe", None, None)},
+        {"P042A250001": ("wrong", "Program officer", "x")},
+        {"P042A250001": ("wrong", "Recipient", "x" * 101)},
+    ):
+        result = project.topo("ingest-findings", str(returned(project, marks)), "--date", "2026-10-20",
+                              expect_exit=2)
+        assert "Structural break" in result.output
+    assert not (project.root / FINDINGS).exists() or findings(project) == []
+
+
+def test_findings_never_change_the_overrides_file(project):
+    setup(project)
+    overrides = write_overrides(project.root, [override_row("P042A250001", "UNITID 900001")])
+    before = overrides.read_bytes()
+    project.topo("run", "--as-of", PULL)
+    path = returned(project, {"P042A250004": ("wrong", "Host institution", "Runs at the Twin Cities campus")})
+
+    project.topo("ingest-findings", str(path), "--date", "2026-10-20")
+    project.topo("report")
+
+    assert overrides.read_bytes() == before
+    rows = by_fain(read_sheet(project.output / f"target_list_{PULL}_v2.xlsx", "Target list"))
+    assert rows["P042A250004"]["Host institution"] == "University of Minnesota-Duluth"
+    assert rows["P042A250004"]["Host confidence"] == "matched"
