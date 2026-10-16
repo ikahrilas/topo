@@ -128,3 +128,10 @@ directory_from_year = 2015
 # supervisory union, 4 regional education service agency, 5 state agency,
 # 7 independent charter agency (the host-linking prototype's set).
 agency_types = [1, 2, 4, 5, 7]
+
+[fac]
+# Federal Audit Clearinghouse full bulk CSVs, fetched by `topo pull fac` (no API
+# key; the links redirect to short-lived signed S3 URLs). federal_awards.csv is
+# about 1.4 GB. Public domain. docs/research/federal-audit-clearinghouse.md.
+federal_awards_url = "https://app.fac.gov/dissemination/public-data/gsa/full/federal_awards.csv"
+general_url = "https://app.fac.gov/dissemination/public-data/gsa/full/general.csv"
