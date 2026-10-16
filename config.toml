@@ -1,0 +1,213 @@
+# topo configuration (ADR 0003): the one place for tolerances, read windows,
+# thresholds, the reporting window and the As-of default. Values are fixed
+# before the first run and never tuned to close a gap. Paths are relative to
+# this file. Later tickets add their own sections here.
+
+[paths]
+data = "data"      # data/raw (pulled), data/cleaned, data/joined, data/curated (committed)
+output = "output"  # delivered files; never overwritten
+
+[as_of]
+# "latest_usaspending_pull" (the date of the newest data/raw/usaspending/<Pull date>/
+# directory) or a fixed date such as "2026-10-07". Never the system clock.
+default = "latest_usaspending_pull"
+
+[reporting_window]
+# First federal fiscal year of the reporting window. The window ends at the last
+# fiscal year that has ended on the As-of date, so it rolls forward on its own.
+start_fy = 2021
+
+[tolerances]
+# Reconciliation (#14): within 1% or $1M, whichever is larger.
+reconciliation_relative = 0.01
+reconciliation_absolute_usd = 1_000_000
+# ASSUMPTION: ED per-program award counts vs USAspending Grants funded, within 1%.
+# ED grantee lists are compared exactly (no tolerance).
+reconciliation_count_relative = 0.01
+
+[reconciliation]
+# A fiscal year less than [target_list] provisional_lag_days past its end on the
+# Pull date that does not reconcile is `provisional`, not failed (#14).
+# ASSUMPTION (#14): ED-list evidence for unfunded Budget periods (on an ED list
+# with funding, no USAspending action) is "large" at 5% or more overall, or over
+# 10% in any Program x FY; the one-pager must then say unfunded status partly
+# reflects USAspending reporting gaps. Evidence never changes Funding status.
+evidence_large_share_overall = 0.05
+evidence_large_share_program_fy = 0.10
+
+[usaspending]
+# Award Data Archive fiscal years fetched by `topo pull usaspending`
+# (reporting window plus lookback), through the fiscal year of the Pull date.
+pull_from_fy = 2010  # the TRIO lookback horizon ([lookback] trio_from_fy)
+# Per-agency archives to fetch. Grants are never selected by agency; this only
+# says which archive files are downloaded. `bulk_agency_id` is USAspending's
+# id for list_monthly_files (ED = 80).
+archive_agencies = [{ toptier_code = "091", bulk_agency_id = 80 }]
+
+[ipeds]
+# Urban Education Data Portal bulk CSVs, fetched by `topo pull ipeds`. Never
+# Urban's /api/ (robots.txt disallows it). ODC-By: cite portal and dataset.
+directory_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_directory.csv"
+# UNVERIFIED file name: check it against
+# https://educationdata.urban.org/documentation/data/api-downloads.json before the first pull.
+enrollment_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_fall-enrollment-race_2024.csv"
+# Directory years kept: names since 2015 cover former names; UEIs start in 2022.
+directory_from_year = 2015
+
+[funding_status]
+# Funding status read windows (ADR 0001, docs/research/status-signals-2025-26.md §4).
+# A Budget period's anniversary is its start date. Its first positive obligation
+# dated up to `continued_after_months` after the anniversary reads "continued";
+# later reads "funded late". With none, the period reads "unfunded" from
+# `unfunded_after_days` after the anniversary and "not yet readable" before that.
+# An action with no usable Budget period is attributed to the period whose
+# window (anniversary - `continued_before_months` .. + `continued_after_months`)
+# holds its action date; a period appears once that window opens.
+continued_before_months = 4
+continued_after_months = 1
+unfunded_after_days = 90
+# The 2025–26 disruption window: Budget periods starting on or between these dates.
+disruption_window_start = 2025-05-01
+disruption_window_end = 2026-09-30
+
+[funding_status.budget_periods]
+# ASSUMPTION: Budget periods in a full project period, by Program family. A Grant
+# is expected to run this many periods (or more, when it was funded for more).
+# Erring short avoids calling a planned final year "unfunded".
+TRIO = 5
+"GEAR UP" = 6
+
+[host_linking]
+# Case-label gating on the frozen answer key (ADR 0002). A label that decides
+# automatically is auto-accepted at >= auto_accept_accuracy with at least
+# auto_accept_min_checks checks, demoted to review below the bar, and reported
+# "unverified" (its rule outcome kept) under the minimum. ASSUMPTION: 95% / 10.
+auto_accept_accuracy = 0.95
+auto_accept_min_checks = 10
+# Once the answer key in data/curated/host_answer_key.csv is labelled, pin its
+# sha256 here; any later edit to the frozen key then stops the run. "" = not pinned.
+answer_key_sha256 = ""
+
+[api_keys]
+# Environment variables holding API keys (never the keys themselves). Set them in
+# the shell or in a .env file beside this one; .env is git-ignored. Only the
+# Census API takes a key.
+census = "CENSUS_API_KEY"
+
+[target_list]
+# Priority tier 1: new Grants within this many months of their award (#26).
+new_award_months = 3
+# A fiscal year less than this many days past its end on the Pull date is labelled
+# "provisional (as of <Pull date>; reporting lag)".
+provisional_lag_days = 90
+# Competitions awarded but whose new FAINs (`<FAIN prefix><yy>`, e.g. P044A26) are
+# not yet in USAspending. Each Program's rows carry "<FY> new awards not yet
+# reported" until one such FAIN appears. Source: docs/research/apr-data-and-fy2026-awards.md (Q2).
+awaited_cohorts = [
+    { program = "Talent Search", fy = 2026 },
+    { program = "Educational Opportunity Centers", fy = 2026 },
+]
+
+[lookback]
+# Lookback (#39): Grants whose project period ended before the reporting window
+# are read back to these fiscal years, only for Succession links and Cohort
+# starts. They never get amount columns or reconciliation rows.
+trio_from_fy = 2010
+gear_up_from_fy = 2015
+# An FY is a Cohort start for a Program when its new awards (A1s) number at least
+# this share of the Program's largest yearly count. ASSUMPTION.
+cohort_min_share = 0.5
+
+[ccd]
+# Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
+# fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.
+lea_directory_url = "https://educationdata.urban.org/csv/ccd/school-districts_lea_directory.csv"
+# District years kept: names since 2015 cover renamed districts.
+directory_from_year = 2015
+# CCD agency types kept as possible district Hosts: 1 regular, 2 component of a
+# supervisory union, 4 regional education service agency, 5 state agency,
+# 7 independent charter agency (the host-linking prototype's set).
+agency_types = [1, 2, 4, 5, 7]
+
+[saipe]
+# Census SAIPE school-district estimates, fetched by `topo pull saipe` from the
+# Census flat file (one request; never Urban's /api/). Urban's SAIPE CSV stops
+# at 2022. `data_year` is the estimate year of that file (ussd24 = 2024
+# estimates, 2024-25 district boundaries).
+school_districts_url = "https://www2.census.gov/programs-surveys/saipe/datasets/2024/2024-school-districts/ussd24.csv"
+data_year = 2024
+
+[edge]
+# NCES EDGE files, fetched by `topo pull edge`: postsecondary campus geocodes
+# (lat/lon by UNITID) and the composite school district polygons (SY 2024-25,
+# GEOID = LEAID except pseudo-districts). Public domain.
+# UNVERIFIED download paths: check them against
+# https://nces.ed.gov/programs/edge/Geographic/SchoolLocations and
+# https://nces.ed.gov/programs/edge/Geographic/DistrictBoundaries before the first pull.
+postsecondary_geocodes_url = "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_POSTSECSCH_2526.zip"
+school_districts_url = "https://nces.ed.gov/programs/edge/data/EDGE_SCHOOLDISTRICT_TL25_SY2425.zip"
+
+[census_geocoder]
+# Fallback only: Campus districts for college Hosts with no EDGE campus point,
+# one single-record call each (`topo pull census_geocoder`, after a first run).
+# The vintage should match the EDGE district polygons (SY 2024-25 = ACS2025_Current).
+url = "https://geocoding.geo.census.gov/geocoder/geographies/address"
+benchmark = "Public_AR_Current"
+vintage = "ACS2025_Current"
+pause_seconds = 1.0
+
+[renewal_timing]
+# Renewal timing (#40). The Predicted due date of a Program's next competition is
+# the prior Cohort's published deadline (data/curated/<deadline_table>, each row
+# cited) plus `cycle_months`. A Program whose observed gap between Cohort starts
+# isn't `cycle_months` is marked "timing not predicted".
+cycle_months = 60
+# Re-competing soon: the Predicted due date is at most this many months after the
+# As-of date (and the latest readable Funding status is continued or funded late).
+# ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
+lead_months = 12
+deadline_table = "deadlines.csv"
+
+[one_pager]
+# The baseline the 2025–26 disruption counts are read against: Grants with an
+# unfunded Budget period in a normal year (docs/research/status-signals-2025-26.md §1).
+baseline_unfunded_grants = 95
+baseline_year = 2024
+baseline_source = "docs/research/status-signals-2025-26.md"
+
+[renewal_backtest]
+# The renewal-timing backtest (#12, #41). The rule is replayed on the
+# `competition_fy` TRIO competition under a per-Program As-of date
+# [renewal_timing] lead_months before that Program's actual deadline (from the
+# deadline table), and its Re-competing soon flag must reach `pass_bar` recall
+# and precision. ASSUMPTION: 95%, the same bar as Case-label gating.
+competition_fy = 2022
+pass_bar = 0.95
+# `topo freeze` pre-registers the predictions for this competition in
+# data/curated/<frozen_predictions>: written once, committed and tagged, never
+# edited. `topo score-predictions` writes each later scoring as a new file.
+freeze_competition_fy = 2027
+frozen_predictions = "fy2027_predictions.csv"
+
+[spot_check]
+# Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
+# (data/curated/review_findings.csv). ASSUMPTION: the founder checks 2–3 states.
+min_states = 2
+max_states = 3
+note_max_chars = 100
+
+[fac]
+# Federal Audit Clearinghouse full bulk CSVs, fetched by `topo pull fac` (no API
+# key; the links redirect to short-lived signed S3 URLs). federal_awards.csv is
+# about 1.4 GB. Public domain. docs/research/federal-audit-clearinghouse.md.
+federal_awards_url = "https://app.fac.gov/dissemination/public-data/gsa/full/federal_awards.csv"
+general_url = "https://app.fac.gov/dissemination/public-data/gsa/full/general.csv"
+# Plausibility check (#43): FAC direct-line amount expended vs USAspending
+# obligations per (Recipient UEI, listing), summed over `plausibility_years`
+# fiscal years ending `audit_lag_years` before the last ended FY (the latest audit
+# year is still being filed). Ratios outside [low, high] are flagged `review`;
+# nothing passes or fails. ASSUMPTION: 5 years, 0.5 / 1.5, one-year lag.
+plausibility_years = 5
+audit_lag_years = 1
+plausibility_ratio_low = 0.5
+plausibility_ratio_high = 1.5

@@ -1,0 +1,360 @@
+"""The match-quality report on Host linking (Markdown), delivered as output/match_quality_<Pull date>.md.
+
+Sections: outcome split by count and dollars; accuracy per Case label with its
+sample size and gating; inter-rater agreement on double-labelled answer-key rows; overrides in force; review and unmatched lists by FAIN;
+Recipients with no UEI link; UEI error exposure; still-active pre-2022 Grants
+with no UEI; breakdowns by Program, by start year and by Host-link flag; Pull date, As-of date and
+input hashes. Dollars are obligations over the reporting-window fiscal years.
+The observed-gap table per Program and the renewal-timing backtest scores with
+its misses (#41). Context reason codes: Grants per Local context reason code
+(#38), every code listed. The founder spot-check block counts Review findings
+by review date, apart from the answer key.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass
+from pathlib import Path
+
+import polars as pl
+
+from topo.domain.host_gating import Gate
+from topo.domain.host_linking import FLAGS, MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
+from topo.domain.local_context import context_reason_counts
+from topo.fiscal import fiscal_year
+from topo.outputs.delivery import delivery_path, write_new
+from topo.outputs.review_queue import grant_dollars
+
+STEM = "match_quality"
+OUTCOMES = (MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED)
+UEI_ERA_START = dt.date(2022, 1, 1)  # Grants that started before 2022 were awarded under DUNS
+
+
+@dataclass(frozen=True)
+class MatchQualityInputs:
+    pull_date: dt.date
+    as_of: dt.date
+    grants: pl.DataFrame  # joined grants
+    fy_obligations: pl.DataFrame
+    host_links: pl.DataFrame  # gated and overridden (topo.domain.host_gating.GatedHostLinks)
+    candidates: pl.DataFrame  # host_link_candidates
+    accuracy: pl.DataFrame  # CaseLabelAccuracy
+    gate: Gate
+    answer_key_rows: int
+    tuning_set_rows: int
+    input_hashes: list[tuple[str, str]]  # (path, sha256)
+    # Renewal timing (#41): the observed-gap table and the backtest scores.
+    cohort_timing: pl.DataFrame | None = None  # topo.domain.renewal_timing.CohortTiming
+    backtest: pl.DataFrame | None = None  # topo.domain.renewal_backtest: renewal_backtest
+    backtest_grants: pl.DataFrame | None = None  # renewal_backtest_grants
+    backtest_bar: float = 0.95
+    local_context: pl.DataFrame | None = None  # joined local_context (topo.domain.local_context.LocalContext)
+    founder_spot_check: pl.DataFrame | None = None  # topo.review_findings.spot_check_summary
+    answer_key: pl.DataFrame | None = None  # HostAnswerKey: double-labelled rows give inter-rater agreement
+
+
+def _money(value: float | None) -> str:
+    return f"${(value or 0):,.0f}"
+
+
+def _pct(part: float, whole: float) -> str:
+    return f"{100 * part / whole:.1f}%" if whole else ""
+
+
+def _cell(value) -> str:
+    return "" if value is None else str(value).replace("|", "/")
+
+
+def _table(header: list[str], rows: list[list]) -> list[str]:
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    lines += ["| " + " | ".join(_cell(v) for v in row) + " |" for row in rows]
+    return lines
+
+
+def _outcome_counts(frame: pl.DataFrame, by: str) -> list[list]:
+    rows = []
+    for key in sorted(frame[by].unique().to_list(), key=lambda v: (v is None, v)):
+        part = frame.filter(pl.col(by) == key) if key is not None else frame.filter(pl.col(by).is_null())
+        counts = [part.filter(pl.col("outcome") == o).height for o in OUTCOMES]
+        rows.append([key, *counts, part.height, _money(part["dollars"].sum())])
+    return rows
+
+
+def render_match_quality(inputs: MatchQualityInputs) -> str:
+    grants = inputs.grants.join(grant_dollars(inputs.grants, inputs.fy_obligations), on="fain")
+    links = inputs.host_links.join(
+        grants.select("fain", "recipient_name", "recipient_uei", "recipient_state", "program", "project_start",
+                      "project_end", "dollars"),
+        on="fain",
+    )
+    total_n, total_usd = links.height, links["dollars"].sum()
+    out = [
+        "# Match-quality report",
+        "",
+        f"Pull date: {inputs.pull_date.isoformat()}. As-of date: {inputs.as_of.isoformat()}. "
+        f"Grants: {total_n}. Dollars are obligations over the reporting-window fiscal years.",
+        "",
+        "## Outcome split",
+        "",
+    ]
+    split = []
+    for outcome in OUTCOMES:
+        part = links.filter(pl.col("outcome") == outcome)
+        usd = part["dollars"].sum()
+        split.append([outcome, part.height, _pct(part.height, total_n), _money(usd), _pct(usd, total_usd)])
+    out += _table(["Outcome", "Grants", "Share of Grants", "Dollars", "Share of dollars"], split)
+
+    gate = inputs.gate
+    out += [
+        "",
+        "## Accuracy per Case label",
+        "",
+        f"A Case label that decides automatically is auto-accepted at {gate.accuracy:.0%} or better with at least "
+        f"{gate.min_checks} checks on the frozen answer key, demoted to review below that, and unverified with fewer "
+        f"checks (its rule outcome then stands). Answer key: {inputs.answer_key_rows} rows. Tuning set: "
+        f"{inputs.tuning_set_rows} rows, never scored here. Accuracy is measured on the rules' own decisions, "
+        "before overrides.",
+        "",
+    ]
+    out += _table(
+        ["Case label", "Rule outcome", "Links", "Checks", "Correct", "Accuracy", "Gating"],
+        [
+            [r["case_label"], r["rule_outcome"], r["links"], r["checks"], r["correct"],
+             "" if r["accuracy"] is None else f"{100 * r['accuracy']:.1f}%", r["gating"]]
+            for r in inputs.accuracy.iter_rows(named=True)
+        ],
+    )
+
+    out += _inter_rater_agreement(inputs.answer_key)
+
+    overridden = links.filter(pl.col("gating") == "override").sort("fain")
+    out += ["", "## Overrides", "", f"{overridden.height} Host links decided by a reviewer's override.", ""]
+    out += _table(
+        ["FAIN", "Host", "Reviewer", "Date", "Note", "Rule case label"],
+        [
+            [r["fain"], f"{r['host_kind']} {r['host_id']}" if r["host_id"] else "no single Host",
+             r["override_reviewer"], r["override_date"], r["override_note"], r["rule_case_label"]]
+            for r in overridden.iter_rows(named=True)
+        ],
+    )
+
+    for heading, outcome in (("Review list", REVIEW), ("Unmatched list", UNMATCHED)):
+        part = links.filter(pl.col("outcome") == outcome).sort("fain")
+        out += ["", f"## {heading}", "", f"{part.height} Grants, {_money(part['dollars'].sum())}.", ""]
+        out += _table(
+            ["FAIN", "Recipient", "State", "Program", "Case label", "Gating", "Dollars"],
+            [
+                [r["fain"], r["recipient_name"], r["recipient_state"], r["program"], r["case_label"], r["gating"],
+                 _money(r["dollars"])]
+                for r in part.iter_rows(named=True)
+            ],
+        )
+
+    uei_linked = inputs.candidates.filter(pl.col("signals").str.split("+").list.contains("uei"))["fain"].unique()
+    no_link = (
+        links.with_columns(pl.col("fain").is_in(uei_linked.implode()).alias("uei_linked"))
+        .group_by("recipient_name", "recipient_uei", "recipient_state")
+        .agg(pl.col("uei_linked").any(), pl.len().alias("grants"), pl.col("dollars").sum())
+        .filter(~pl.col("uei_linked"))
+        .sort("recipient_state", "recipient_name", "recipient_uei", nulls_last=True)
+    )
+    out += [
+        "",
+        "## Recipients with no UEI link",
+        "",
+        f"{no_link.height} Recipients whose UEI matched no same-state IPEDS unit on any of their Grants "
+        "(UEI \"none\": the Recipient carries no UEI and is matched on name and text only).",
+        "",
+    ]
+    out += _table(
+        ["Recipient", "Recipient UEI", "State", "Grants", "Dollars"],
+        [
+            [r["recipient_name"], r["recipient_uei"] or "none", r["recipient_state"], r["grants"], _money(r["dollars"])]
+            for r in no_link.iter_rows(named=True)
+        ],
+    )
+
+    picked = links.filter(pl.col("host_id").is_not_null() & pl.col("outcome").is_in([MATCHED, REVIEW])).join(
+        inputs.candidates.select("fain", "host_kind", "host_id", "signals"), on=["fain", "host_kind", "host_id"]
+    )
+    exposed = picked.filter(pl.col("signals") == "uei")
+    by_label = exposed.group_by("case_label").agg(pl.len().alias("grants"), pl.col("dollars").sum()).sort("case_label")
+    out += [
+        "",
+        "## UEI error exposure",
+        "",
+        f"{exposed.height} Grants ({_money(exposed['dollars'].sum())}) have a Host that rests on the Recipient UEI "
+        "alone, with no other signal agreeing. If IPEDS lists that UEI against the wrong unit, these links are wrong.",
+        "",
+    ]
+    out += _table(
+        ["Case label", "Grants", "Dollars"],
+        [[r["case_label"], r["grants"], _money(r["dollars"])] for r in by_label.iter_rows(named=True)],
+    )
+
+    pre_uei = links.filter(
+        pl.col("recipient_uei").is_null()
+        & (pl.col("project_start") < UEI_ERA_START)
+        & (pl.col("project_end") >= inputs.as_of)
+    ).sort("fain")
+    out += [
+        "",
+        "## Still-active pre-2022 Grants with no UEI",
+        "",
+        f"{pre_uei.height} Grants started before {UEI_ERA_START.isoformat()}, are still active on the As-of date "
+        "(project end on or after it) and carry no Recipient UEI on any action. No DUNS value is used to link them.",
+        "",
+    ]
+    out += _table(
+        ["FAIN", "Recipient", "State", "Program", "Outcome"],
+        [[r["fain"], r["recipient_name"], r["recipient_state"], r["program"], r["outcome"]]
+         for r in pre_uei.iter_rows(named=True)],
+    )
+
+    header = [*OUTCOMES, "Grants", "Dollars"]
+    out += ["", "## By Program", ""]
+    out += _table(["Program", *header], _outcome_counts(links, "program"))
+    by_year = links.with_columns(
+        pl.col("project_start").map_elements(fiscal_year, return_dtype=pl.Int64).alias("start_fy")
+    )
+    out += ["", "## By start year", "", "Fiscal year of the Grant's project start.", ""]
+    out += _table(["Start FY", *header], _outcome_counts(by_year, "start_fy"))
+
+    out += [
+        "",
+        "## By Host-link flag",
+        "",
+        "Notes beside the Case label, never part of it: gating and accuracy run on the Case label alone. "
+        "followed_ipeds_merge = linked to the same-state unit an IPEDS unit merged into; unit_as_of_start_year = "
+        "kept as the unit it was at the Grant's start year; no_uei = the Recipient carries no UEI.",
+        "",
+    ]
+    out += _table(["Flag", *header], [
+        [flag, *(links.filter(pl.col(flag) & (pl.col("outcome") == o)).height for o in OUTCOMES),
+         links.filter(pl.col(flag)).height, _money(links.filter(pl.col(flag))["dollars"].sum())]
+        for flag in FLAGS
+    ])
+
+    out += _renewal_timing_sections(inputs)
+    if inputs.local_context is not None:
+        reasons = context_reason_counts(inputs.local_context)
+        out += [
+            "",
+            "## Context reason codes",
+            "",
+            "Grants whose Local context is blank, in whole or in part, by reason. Context comes only through the "
+            "Host institution, never the Recipient or the state. A Grant can carry more than one code.",
+            "",
+        ]
+        out += _table(["Context reason", "Grants"], reasons.rows())
+    out += _founder_spot_check(inputs.founder_spot_check)
+
+    out += ["", "## Inputs", ""]
+    out += _table(["Input", "SHA-256"], [[path, sha] for path, sha in inputs.input_hashes])
+    return "\n".join(out) + "\n"
+
+
+def _inter_rater_agreement(answer_key: pl.DataFrame | None) -> list[str]:
+    """Agreement between the two labels of double-labelled answer-key rows; disagreements by FAIN."""
+    out = ["", "## Inter-rater agreement", ""]
+    twice = (
+        answer_key.filter(pl.col("second_host").is_not_null()).sort("fain")
+        if answer_key is not None and "second_host" in answer_key.columns else None
+    )
+    if twice is None or not twice.height:
+        return [*out, "No answer-key row is labelled twice yet."]
+    disagree = twice.filter(pl.col("host") != pl.col("second_host"))
+    agree = twice.height - disagree.height
+    out += [
+        f"{twice.height} answer-key rows are labelled twice; the two labels agree on {agree} "
+        f"({_pct(agree, twice.height)}). Accuracy above scores the primary label only.",
+        "",
+    ]
+    return out + _table(
+        ["FAIN", "Host", "Reviewer", "Second host", "Second reviewer"],
+        [[r["fain"], r["host"], r["reviewer"], r["second_host"], r["second_reviewer"]]
+         for r in disagree.iter_rows(named=True)],
+    )
+
+
+def _share(value: float | None) -> str:
+    return "" if value is None else f"{100 * value:.1f}%"
+
+
+def _renewal_timing_sections(inputs: MatchQualityInputs) -> list[str]:
+    """The observed-gap table per Program and the renewal-timing backtest with its misses."""
+    out: list[str] = []
+    if inputs.cohort_timing is not None:
+        out += [
+            "",
+            "## Observed gaps between Cohort starts",
+            "",
+            "Per Program, each Cohort start (read over the pull and the lookback) and the gap in months from the "
+            "previous one. A TRIO Program with any gap other than the cycle is \"timing not predicted\".",
+            "",
+        ]
+        out += _table(
+            ["Program", "Cohort FY", "Cohort start", "Observed gap (months)", "Renewal timing"],
+            [[r["program"], f"FY{r['cohort_fy']}", r["cohort_start"], r["observed_gap_months"], r["timing"]]
+             for r in inputs.cohort_timing.sort("program", "cohort_fy").iter_rows(named=True)],
+        )
+    if inputs.backtest is not None:
+        fys = inputs.backtest["competition_fy"].unique().to_list()
+        heading = f"Renewal-timing backtest (FY{fys[0]})" if len(fys) == 1 else "Renewal-timing backtest"
+        out += [
+            "",
+            f"## {heading}",
+            "",
+            "Each TRIO Program's rule is replayed under its own As-of date, 12 months before its actual deadline, "
+            "seeing only actions dated and deadlines passed by then. Timing error is the Predicted due date minus "
+            "the actual deadline, in months. A prior-Cohort Grant re-competed when no Budget period starting on or "
+            "after the new Cohort's start was funded on it. A Program passes when the Re-competing soon flag reaches "
+            f"{inputs.backtest_bar:.0%} recall and {inputs.backtest_bar:.0%} precision. The Succession rate is "
+            "descriptive only: USAspending can't see losers or non-applicants.",
+            "",
+        ]
+        out += _table(
+            ["Program", "Backtest As-of date", "Prior Cohort", "Predicted due date", "Evidence tier",
+             "Actual deadline", "Timing error (months)", "Grants", "Re-competed", "Flagged",
+             "Flagged and re-competed", "Recall", "Precision", "Result", "Succession rate"],
+            [
+                [r["program"], r["as_of"], None if r["prior_cohort_fy"] is None else f"FY{r['prior_cohort_fy']}",
+                 r["predicted_due_date"] or r["timing"], r["evidence_tier"], r["actual_deadline"],
+                 r["timing_error_months"], r["grants"], r["re_competed"], r["flagged"],
+                 r["flagged_and_re_competed"], _share(r["recall"]), _share(r["precision"]), r["result"],
+                 None if r["with_succession"] is None else f"{r['with_succession']} of {r['re_competed']}"]
+                for r in inputs.backtest.iter_rows(named=True)
+            ],
+        )
+    if inputs.backtest_grants is not None:
+        misses = inputs.backtest_grants.filter(pl.col("flagged") != pl.col("re_competed")).sort("program", "fain")
+        out += ["", "## Backtest misses", "",
+                f"{misses.height} prior-Cohort Grants whose flag disagreed with what happened.", ""]
+        out += _table(
+            ["Program", "FAIN", "Latest readable status (backtest As-of)", "Flagged", "Re-competed"],
+            [[r["program"], r["fain"], r["latest_readable_status"], "yes" if r["flagged"] else "no",
+              "yes" if r["re_competed"] else "no"] for r in misses.iter_rows(named=True)],
+        )
+    return out
+
+
+def _founder_spot_check(summary: pl.DataFrame | None) -> list[str]:
+    """The founder spot-check block: Review findings by review date, apart from the answer key."""
+    out = [
+        "",
+        "## Founder spot-check",
+        "",
+        "Review findings from the founder's spot checks, by review date. They are kept apart from the answer "
+        "key, never scored in the accuracy above, and never change an override by themselves.",
+    ]
+    if summary is None or not summary.height:
+        return out + ["", "No Review findings yet."]
+    out.append("")
+    return out + _table(list(summary.columns), [list(r) for r in summary.iter_rows()])
+
+
+def write_match_quality(text: str, output_dir: Path, pull_date: dt.date) -> Path:
+    path = delivery_path(output_dir, STEM, pull_date, "md")
+    write_new(path, text.encode())
+    return path

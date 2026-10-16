@@ -1,8 +1,17 @@
 # secrets
 .env
 
-# raw pulled data: keep only the ed.gov manifest (layout provisional, see #15)
+# raw pulled data is git-ignored; only the one raw manifest for all sources is committed (ADR 0003)
 data/raw/*
-!data/raw/ed_grantee_lists/
-data/raw/ed_grantee_lists/*
-!data/raw/ed_grantee_lists/manifest.csv
+!data/raw/manifest.csv
+
+# rebuildable layers and delivered outputs (ADR 0003); data/curated/ is committed
+data/cleaned/
+data/joined/
+output/
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

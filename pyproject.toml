@@ -1,0 +1,33 @@
+[project]
+name = "topo"
+version = "0.1.0"
+description = "Public-data pipeline for TRIO and GEAR UP Grants: who holds them, where, how much, and when they re-compete"
+authors = [
+    { name = "ikahrilas", email = "ijk60068@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "duckdb>=1.5.6",
+    "fpdf2>=2.8.9",
+    "openpyxl>=3.1.5",
+    "pandera[polars]>=0.34.1",
+    "pdfplumber>=0.11.10",
+    "polars>=2.0.0",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+topo = "topo:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+testpaths = ["tests"]
