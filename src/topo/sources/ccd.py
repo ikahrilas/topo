@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 import pandera.polars as pa
 import polars as pl
 
+from topo import provenance, run_log
 from topo.config import Config, Layout
 from topo.guards import StructuralBreak, check_schema, check_unique
 from topo.sources.usaspending import PulledFile
@@ -156,12 +157,24 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     path = layout.raw_source(SOURCE) / pull_date.isoformat() / name
     if not path.exists():
         raise StructuralBreak(f"CCD pull lacks {name} ({path.parent})")
-    leas = clean_lea_directory(
-        pl.scan_csv(path, infer_schema=False),
-        from_year=int(settings["directory_from_year"]),
-        agency_types=[int(t) for t in settings["agency_types"]],
-        raw_file=name,
-        pull_date=pull_date,
+    raw = pl.scan_csv(path, infer_schema=False)
+    from_year = int(settings["directory_from_year"])
+    agency_types = [int(t) for t in settings["agency_types"]]
+    input_hash = provenance.record_raw_inputs(config, SOURCE, [path])
+    leas = clean_lea_directory(raw, from_year=from_year, agency_types=agency_types, raw_file=name, pull_date=pull_date)
+    # Drops are counted on the raw rows in their own pass, not from the cleaned frame.
+    year = pl.col("year").str.strip_chars().cast(pl.Int64, strict=False)
+    agency_type = pl.col("agency_type").str.strip_chars().cast(pl.Int64, strict=False)
+    early = year.is_null() | (year < from_year)
+    counts = raw.select(
+        pl.len().alias("rows_in"),
+        early.sum().alias("year_before_directory_from_year"),
+        (~early & ~agency_type.is_in(agency_types).fill_null(False)).sum().alias("agency_type_not_a_district"),
+    ).collect().row(0, named=True)
+    rows_in = counts.pop("rows_in")
+    run_log.record(
+        config, layer="clean", source=LEA_DIRECTORY_TABLE, rows_in=rows_in, rows_out=leas.height,
+        drops={reason: int(n) for reason, n in counts.items()}, pull_date=pull_date, input_hash=input_hash,
     )
     layout.cleaned.mkdir(parents=True, exist_ok=True)
     leas.write_parquet(layout.cleaned_table(LEA_DIRECTORY_TABLE))

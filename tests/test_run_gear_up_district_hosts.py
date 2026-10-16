@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import polars as pl
 from support.ccd import LEA_COLUMNS, LEA_CSV, lea_row
 from support.ipeds import DIRECTORY_COLUMNS, ENROLLMENT_COLUMNS, directory_row, write_csv
@@ -56,3 +58,23 @@ def test_a_partnership_links_to_the_district_it_names_never_the_college(project)
     assert candidates.select("fain", "host_kind", "host_id", "signals").rows() == [
         ("P334A250001", "LEAID", "4840860", "desc"),
     ]
+
+
+def test_ccd_clean_is_logged_with_named_drops_and_its_raw_file_reaches_the_sidecar(project):
+    write_sources(project)
+    write_csv(project.root / "data" / "raw" / "ccd" / PULL / LEA_CSV, LEA_COLUMNS, [
+        lea_row("4840860", "Socorro ISD", "TX", year=2014),                   # before directory_from_year
+        lea_row("4840860", "Socorro Independent School District", "TX"),
+        lea_row("2500001", "Some Supervisory Union", "MA", agency_type=3),    # not a district agency type
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    logged = {(r["layer"], r["source"]): r for r in pl.read_parquet(project.output / "run_log.parquet").to_dicts()}
+    clean = logged[("clean", "ccd_lea_directory")]
+    assert (clean["rows_in"], clean["rows_out"]) == (3, 1)
+    assert {d["reason"]: d["rows"] for d in clean["drops"]} == {
+        "year_before_directory_from_year": 1, "agency_type_not_a_district": 1,
+    }
+    sidecar = json.loads((project.output / f"target_list_{PULL}.csv.provenance.json").read_text())
+    assert [f["path"] for f in sidecar["raw_files"] if f["source"] == "ccd"] == [f"data/raw/ccd/{PULL}/{LEA_CSV}"]
