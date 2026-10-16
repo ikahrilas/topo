@@ -11,7 +11,7 @@ from typing import Annotated, Optional
 import typer
 
 from topo import manifest, pipeline, provenance, review_findings
-from topo.config import Config, load_config
+from topo.config import Config, load_config, parse_date
 from topo.guards import RunWarning, StructuralBreak
 from topo.sources import SOURCES
 
@@ -37,7 +37,7 @@ def _config() -> Config:
 
 
 def _date(value: str | None) -> dt.date | None:
-    return dt.date.fromisoformat(value) if value else None
+    return parse_date(value) if value else None
 
 
 def _guarded(fn, allow_dirty: bool | None = None):

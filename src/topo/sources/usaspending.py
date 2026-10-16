@@ -29,7 +29,7 @@ from topo.domain.programs import LISTINGS
 from topo.fiscal import fiscal_year
 from topo.guards import StructuralBreak, check_schema, check_unique
 from topo.sources import raw as raw_tree
-from topo.sources.raw import PulledFile  # noqa: F401  (re-exported: sources' pull results)
+from topo.sources.raw import PulledFile
 
 SOURCE = "usaspending"
 CLEANED_TABLE = "usaspending_actions"

@@ -160,9 +160,9 @@ def test_known_list_gaps_are_recorded_not_chased(project, no_network):
 
 def test_the_committed_manifest_records_the_11_known_gaps():
     from conftest import REPO_ROOT
-    from topo.sources.ed_grantee_lists import read_manifest
+    from topo.sources.ed_grantee_lists import read_ed_list_manifest_rows
 
-    manifest = read_manifest(REPO_ROOT / "data" / "raw" / "manifest.csv")
+    manifest = read_ed_list_manifest_rows(REPO_ROOT / "data" / "raw" / "manifest.csv")
 
     gaps = sorted((r.program, r.fy) for r in manifest if r.status == "missing")
     assert len(gaps) == 11

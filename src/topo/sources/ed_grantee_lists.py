@@ -141,7 +141,7 @@ def manifest_path(config: Config) -> Path:
     return raw_manifest.manifest_path(config)
 
 
-def read_manifest(path: Path) -> list[ManifestRow]:
+def read_ed_list_manifest_rows(path: Path) -> list[ManifestRow]:
     """The ED grantee-list rows (source == "ed_grantee_lists") of the validated raw manifest."""
     frame = raw_manifest.read_manifest(path).filter(pl.col("source") == SOURCE)
     rows = []
@@ -422,7 +422,7 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     """
     layout = config.layout
     path = manifest_path(config)
-    manifest = read_manifest(path) if path.exists() else []
+    manifest = read_ed_list_manifest_rows(path) if path.exists() else []
 
     trio: list[dict] = []
     gearup: list[dict] = []
