@@ -2,8 +2,8 @@
 
 ed.gov blocks non-browser clients, so these lists are filed by hand (#5) and
 never fetched: this source has no `pull`, and `clean` makes no request. It reads
-only the files named by `ok` rows of the committed, checksummed manifest
-(data/raw/ed_grantee_lists/manifest.csv) and stops the run when a filed file
+only the files named by `ok` rows of the committed, checksummed raw manifest
+(data/raw/manifest.csv, rows with source "ed_grantee_lists") and stops the run when a filed file
 is absent or its bytes or SHA-256 differ from the manifest. Files in the
 folder that the manifest doesn't name are ignored. `missing` rows are the known
 list gaps (#16): they are recorded in the coverage table, never chased.
@@ -18,7 +18,6 @@ Cleaned tables:
 
 from __future__ import annotations
 
-import csv
 import datetime as dt
 import hashlib
 import re
@@ -31,6 +30,8 @@ import pandera.polars as pa
 import pdfplumber
 import polars as pl
 
+from topo import manifest as raw_manifest
+from topo import provenance, run_log
 from topo.config import Config, Layout
 from topo.domain.programs import PROGRAMS, TRIO, Program
 from topo.guards import StructuralBreak, check_schema, check_unique
@@ -43,6 +44,7 @@ CLEANED_TABLES = (TRIO_TABLE, GEARUP_TABLE, COVERAGE_TABLE)
 
 FILED = "ok"
 MISSING = "missing"
+DROP_FY_OUTSIDE_FILED_RANGE = "fy_outside_filed_range"  # a GEAR UP page table for an FY the manifest row doesn't cover
 
 # Manifest program key -> FAIN prefix of the Program it lists.
 MANIFEST_PROGRAMS: dict[str, str] = {
@@ -134,18 +136,16 @@ class ManifestRow:
         return list(range(int(first), int(last or first) + 1))
 
 
-def manifest_path(layout: Layout) -> Path:
-    return layout.raw_source(SOURCE) / "manifest.csv"
+def manifest_path(config: Config) -> Path:
+    """The one raw manifest for all sources (ADR 0003); this source reads its own rows."""
+    return raw_manifest.manifest_path(config)
 
 
 def read_manifest(path: Path) -> list[ManifestRow]:
-    """The ED grantee-list manifest rows. A `source` column, when present, filters to this source."""
-    with path.open(newline="", encoding="utf-8") as f:
-        records = list(csv.DictReader(f))
+    """The ED grantee-list rows (source == "ed_grantee_lists") of the validated raw manifest."""
+    frame = raw_manifest.read_manifest(path).filter(pl.col("source") == SOURCE)
     rows = []
-    for rec in records:
-        if rec.get("source") not in (None, "", SOURCE):
-            continue
+    for rec in frame.iter_rows(named=True):
         program = rec["program"]
         if program not in MANIFEST_PROGRAMS:
             raise StructuralBreak(f"ED grantee-list manifest names unknown program {program!r}")
@@ -155,10 +155,10 @@ def read_manifest(path: Path) -> list[ManifestRow]:
                 fy=rec["fy"],
                 status=rec["status"],
                 pull_date=dt.date.fromisoformat(rec["pull_date"]),
-                bytes=int(rec["bytes"]) if rec.get("bytes") else None,
-                sha256=rec.get("sha256", ""),
-                stored_name=Path(rec["stored_path"]).name if rec.get("stored_path") else "",
-                note=rec.get("note", ""),
+                bytes=int(rec["bytes"]) if rec["bytes"] else None,
+                sha256=rec["sha256"] or "",
+                stored_name=Path(rec["stored_path"]).name if rec["stored_path"] else "",
+                note=rec["note"] or "",
             )
         )
     return rows
@@ -379,13 +379,15 @@ def parse_gearup_page(html: str, label: str) -> list[dict]:
     return rows
 
 
-def _gearup_rows(layout: Layout, row: ManifestRow) -> list[dict]:
+def _gearup_rows(layout: Layout, row: ManifestRow) -> tuple[list[dict], int, int]:
+    """New-award rows in the manifest row's FY range, plus the page's row count and the rows outside the range."""
     data = verified_bytes(layout, row)
     sha256 = hashlib.sha256(data).hexdigest()
     program = program_of(row.program)
     in_range = set(row.fiscal_years)
-    parsed = [r for r in parse_gearup_page(data.decode("utf-8", errors="replace"), row.stored_name)
-              if r["fiscal_year"] in in_range]
+    page = parse_gearup_page(data.decode("utf-8", errors="replace"), row.stored_name)
+    outside = sum(r["fiscal_year"] not in in_range for r in page)
+    parsed = [r for r in page if r["fiscal_year"] in in_range]
     numbers: dict[int, int] = {}
     out = []
     for rec in parsed:
@@ -400,7 +402,7 @@ def _gearup_rows(layout: Layout, row: ManifestRow) -> list[dict]:
                 "filed_date": row.pull_date,
             }
         )
-    return out
+    return out, len(page), outside
 
 
 # --------------------------------------------------------------------- clean
@@ -419,19 +421,22 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     Returns the TRIO list rows.
     """
     layout = config.layout
-    path = manifest_path(layout)
+    path = manifest_path(config)
     manifest = read_manifest(path) if path.exists() else []
 
     trio: list[dict] = []
     gearup: list[dict] = []
     coverage: list[dict] = []
+    gearup_on_pages = gearup_outside_range = 0
     for row in manifest:
         program = program_of(row.program)
         status = {fy: (row.status, row.note) for fy in row.fiscal_years}
         if row.status == FILED and program.family == TRIO:
             trio.extend(_trio_rows(layout, row))
         elif row.status == FILED:
-            new_awards = _gearup_rows(layout, row)
+            new_awards, on_page, outside = _gearup_rows(layout, row)
+            gearup_on_pages += on_page
+            gearup_outside_range += outside
             gearup.extend(new_awards)
             tabled = {r["fiscal_year"] for r in new_awards}
             for fy in status:
@@ -460,6 +465,22 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     list_coverage = _frame(EdListCoverage, coverage).sort("program", "fiscal_year")
     check_unique(list_coverage, ["manifest_program", "fiscal_year"], "ED grantee-list coverage")
     list_coverage = check_schema(EdListCoverage, list_coverage, "ED grantee-list coverage")
+
+    # Recorded once every filed list has passed its checksum.
+    input_hash = provenance.record_raw_inputs(
+        config, SOURCE, [layout.raw_source(SOURCE) / row.stored_name for row in manifest if row.status == FILED]
+    )
+    if manifest:
+        # TRIO rows in = rows the lists state (each list's parse already matches its stated total).
+        pull_date = max(row.pull_date for row in manifest)
+        run_log.record(
+            config, layer="clean", source=TRIO_TABLE, rows_in=len(trio), rows_out=trio_rows.height,
+            drops={}, pull_date=pull_date, input_hash=input_hash,
+        )
+        run_log.record(
+            config, layer="clean", source=GEARUP_TABLE, rows_in=gearup_on_pages, rows_out=gearup_rows.height,
+            drops={DROP_FY_OUTSIDE_FILED_RANGE: gearup_outside_range}, pull_date=pull_date, input_hash=input_hash,
+        )
 
     layout.cleaned.mkdir(parents=True, exist_ok=True)
     trio_rows.write_parquet(layout.cleaned_table(TRIO_TABLE))
