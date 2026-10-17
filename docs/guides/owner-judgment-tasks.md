@@ -23,10 +23,10 @@ Do the tasks in this order around the first real run. Tasks 2 and 3 then repeat 
 |---|---|---|
 | 1 | [6. Confirm the ASSUMPTIONs in `config.toml`](#6-confirmed-assumptions) | Done on 2026-10-17. Before the first real run. |
 | 2 | [7. Check the missing ED grantee lists](#7-missing-ed-grantee-lists) | Before the first real run. Act only if a list turns up. |
-| 3 | [5. Fill the curated reference files](#5-keep-the-curated-reference-files-up-to-date) | Before the first real run. The deadline rows are urgent. |
+| 3 | [5. Check the curated reference files](#5-keep-the-curated-reference-files-up-to-date) | Before the first real run. The files are filed; check the Talent Search FY2026 deadline. |
 | 4 | [8. Commit everything; use `--allow-dirty` only for trials](#8-the-dirty-tree-guard-and---allow-dirty) | Before every run. |
 | 5 | First real run: `uv run topo run` | After steps 1 to 4. |
-| 6 | [4. Freeze the FY2027 predictions](#4-freeze-the-fy2027-predictions) | Right after the first real run. Time-critical. |
+| 6 | [4. Freeze the FY2027 predictions](#4-freeze-the-fy2027-predictions) | Right after the first real run, and before 2026-12-16. Time-critical. |
 | 7 | [1. Label the frozen answer key](#1-label-the-frozen-answer-key) | After the labelling sheet is available. |
 | 8 | [2. Decide items in the review queue](#2-decide-items-in-the-review-queue) | After each delivered run. |
 | 9 | [3. Run the founder spot-check loop](#3-run-the-founder-spot-check-loop) | After a delivered run. Repeat as needed. |
@@ -102,26 +102,29 @@ File: `data/curated/host_answer_key.csv`. One row per FAIN. A FAIN must not repe
 
 The tuning set, `data/curated/host_tuning_set.csv`, has the same columns. It is a separate set that grows over time. The pipeline never scores it. Use it when you change a rule. A FAIN in both files stops the run.
 
+As of 2026-10-17, the tuning set has 326 rows with `reviewer` = `prototype`. They come from the prototype's hand checks in `prototypes/host-linking/holdout_judgments.csv`. Thus a key Grant must not be one of these 326 FAINs.
+
 ### Steps
 
 1. Open the labelling sheet.
-2. Count the rows for each Case label. Make sure each Case label that decides without a person has at least 10 rows.
-3. For each Grant, read the evidence and apply the Host rules above.
-4. Write `fain`, `host`, `reviewer`, `labelled_on` and `note` in `data/curated/host_answer_key.csv`.
+2. Remove each FAIN that is also in `data/curated/host_tuning_set.csv`.
+3. Count the rows for each Case label. Make sure each Case label that decides without a person has at least 10 rows.
+4. For each Grant, read the evidence and apply the Host rules above.
+5. Write `fain`, `host`, `reviewer`, `labelled_on` and `note` in `data/curated/host_answer_key.csv`.
 
    CAUTION: A spreadsheet program can remove the leading zeros of a LEAID. Edit the file as text, or import the columns as text.
 
-5. If you cannot decide a Host from the evidence, remove that Grant from the sample.
-6. Choose about 40 rows for the second pass. Include rows from the weak cases.
-7. Send those FAINs to the second reviewer without your `host` values.
-8. Write the second reviewer's answers in `second_host` and `second_reviewer`.
-9. Do a trial run to check the file format: `uv run topo join --allow-dirty`.
-10. Commit `data/curated/host_answer_key.csv`.
-11. Calculate the hash: `shasum -a 256 data/curated/host_answer_key.csv`.
-12. Write the hash in `config.toml`, section `[host_linking]`, key `answer_key_sha256`.
-13. Commit `config.toml`.
-14. Run the pipeline: `uv run topo run`.
-15. Read the sections "Accuracy per Case label" and "Inter-rater agreement" in `output/match_quality_<Pull date>.md`.
+6. If you cannot decide a Host from the evidence, remove that Grant from the sample.
+7. Choose about 40 rows for the second pass. Include rows from the weak cases.
+8. Send those FAINs to the second reviewer without your `host` values.
+9. Write the second reviewer's answers in `second_host` and `second_reviewer`.
+10. Do a trial run to check the file format: `uv run topo join --allow-dirty`.
+11. Commit `data/curated/host_answer_key.csv`.
+12. Calculate the hash: `shasum -a 256 data/curated/host_answer_key.csv`.
+13. Write the hash in `config.toml`, section `[host_linking]`, key `answer_key_sha256`.
+14. Commit `config.toml`.
+15. Run the pipeline: `uv run topo run`.
+16. Read the sections "Accuracy per Case label" and "Inter-rater agreement" in `output/match_quality_<Pull date>.md`.
 
 ### Check
 
@@ -132,7 +135,7 @@ The tuning set, `data/curated/host_tuning_set.csv`, has the same columns. It is 
 
 ### Do not
 
-- Do not copy the #3 hand labels or `prototypes/host-linking/holdout_judgments.csv` into the key. Those labels tuned the rules. They can go into the tuning set.
+- Do not copy the #3 hand labels or `prototypes/host-linking/holdout_judgments.csv` into the key. Those labels tuned the rules. The holdout judgments are already in the tuning set.
 - Do not change the key after you pin its hash. Any change to the file stops the run with "the frozen answer key host_answer_key.csv changed".
 - Do not pin the hash before the second pass is complete.
 - Do not change a rule because a key Grant failed. Find other Grants with the same problem, put them in the tuning set, and change the rule against those.
@@ -221,6 +224,7 @@ You can also override a Grant from the "Unmatched list" section of the match-qua
 
 ### Check
 
+- The run gives no warning that a Host override names a FAIN not in this run.
 - The Grant is not in the new review queue.
 - The "Overrides" section of the match-quality report counts it.
 - On the target list, its Host confidence is `matched` or `lower-confidence: no single Host`.
@@ -229,7 +233,7 @@ You can also override a Grant from the "Unmatched list" section of the match-qua
 
 - Do not copy the `Candidate host` name into `host`. Use the ID.
 - Do not delete an old override row to change a decision.
-- Do not check the FAIN spelling only by eye. The pipeline ignores an override whose FAIN is not in the run, and gives no warning.
+- Do not ignore the warning "Host override names a FAIN not in this run". The pipeline does not apply that override. Add a new row with the correct FAIN.
 - Do not add an override because of a founder mark alone (task 3).
 - Do not add an override to improve a Case label's score. Scores use the rule's decision before overrides.
 
@@ -287,25 +291,29 @@ CAUTION: The ingest stops on a bad mark, on a "Field" that is not a column, or o
 
 **Why:** A prediction is a real test only if it is fixed before the result is known. `topo freeze` writes the file once and stamps it with the As-of date, the commit, the config hash and the rule version. If anyone edits the file, the later score has no value. Each later scoring goes to a new file, so the frozen file stays as it is.
 
-**When:** One time, right after the first real run. You must freeze before ED publishes any FY2027 notice for Upward Bound, Upward Bound Math and Science, Veterans Upward Bound or McNair. The FY2022 Upward Bound notice appeared on Dec. 16, 2021, so the FY2027 notice can appear soon.
+**When:** One time, inside the window that these two limits give. The first real run already falls inside it.
+
+- **Earliest:** a run whose As-of date is 2026-06-10 or later. The FY2027 Predicted due dates are the FY2022 deadlines plus 60 months: Upward Bound 2027-01-31, McNair 2027-04-25, Upward Bound Math and Science 2027-06-03 and Veterans Upward Bound 2027-06-10. A Grant is flagged only when its Predicted due date is at most 12 months after the As-of date. With an earlier As-of date, some of the four Programs get no flagged Grants.
+- **Latest:** the day before the Federal Register publishes the first FY2027 notice inviting applications for any of the four Programs. As of 2026-10-17, none is published. The FY2022 notices appeared on 2021-12-16 (Upward Bound), 2022-03-09 (McNair), 2022-04-19 (Upward Bound Math and Science) and 2022-04-26 (Veterans Upward Bound). Thus the first FY2027 notice can appear from about mid-December 2026. Freeze before 2026-12-16, and search the Federal Register on the day you freeze.
 
 ### Steps
 
-1. Make sure `data/curated/deadlines.csv` has the FY2022 rows for the four Programs above (task 5).
-2. Make sure it also has the rows for the Cohort before FY2022. The FY2022 backtest needs them.
+1. Make sure `data/curated/deadlines.csv` has the FY2017 and FY2022 rows for the four Programs above. It has them as of 2026-10-17.
+2. Search the Federal Register for an FY2027 notice for the four Programs. If one exists, the freeze is late. Write that in the commit message.
 
    CAUTION: Do not add an FY2027 deadline row before you freeze. If you do, the "prediction" uses the real date.
 
 3. Commit all changes.
 4. Run the pipeline: `uv run topo run`.
 5. Read "Renewal-timing backtest (FY2022)" in the match-quality report. Write the result in your commit message. The freeze does not need a pass.
-6. Freeze: `uv run topo freeze`.
-7. Open `data/curated/fy2027_predictions.csv`. Make sure it has one row for each TRIO Program whose Cohort competes in FY2027.
-8. Add the file and its sidecar: `git add data/curated/fy2027_predictions.csv data/curated/fy2027_predictions.csv.provenance.json`.
-9. Commit the two files.
-10. Tag the commit: `git tag fy2027-predictions`.
-11. Push the commit and the tag.
-12. Merge with a merge commit, not a squash. The tagged commit must stay in the history of `main`.
+6. Make sure the As-of date of the run is 2026-06-10 or later. The sidecars show it.
+7. Freeze: `uv run topo freeze`.
+8. Open `data/curated/fy2027_predictions.csv`. Make sure it has one row for each of the four Programs, with `timing` = `predicted`.
+9. Add the file and its sidecar: `git add data/curated/fy2027_predictions.csv data/curated/fy2027_predictions.csv.provenance.json`.
+10. Commit the two files.
+11. Tag the commit: `git tag fy2027-predictions`.
+12. Push the commit and the tag.
+13. Merge with a merge commit, not a squash. The tagged commit must stay in the history of `main`.
 
 ### Later: score the predictions
 
@@ -315,9 +323,10 @@ Do this after ED publishes the FY2027 notices and the new Cohort's FAINs appear 
 2. Commit the file.
 3. Pull fresh USAspending data: `uv run topo pull usaspending`.
 4. Run the pipeline: `uv run topo run`.
-5. Make sure the frozen file did not change: `git diff fy2027-predictions -- data/curated/fy2027_predictions.csv` shows nothing.
-6. Score: `uv run topo score-predictions`.
-7. Commit `data/curated/fy2027_predictions_scored_<As-of>.csv` and its sidecar.
+5. Score: `uv run topo score-predictions`.
+6. Read the output. If the frozen file differs from the tagged copy, the command warns: "Warning: data/curated/fy2027_predictions.csv differs from the copy tagged fy2027-predictions".
+7. If you get that warning, do not use the score. Find the edit with `git diff fy2027-predictions -- data/curated/fy2027_predictions.csv`.
+8. Commit `data/curated/fy2027_predictions_scored_<As-of>.csv` and its sidecar.
 
 The scored file gives, per Program: `actual_deadline`, `timing_error_months`, `recall`, `precision` and `result`. The `result` is `pass`, `miss` or a `not scored: ...` reason. A missing deadline row gives `not scored: no deadline for the competition in the deadline table`. A Cohort not yet in the pull gives `not scored: the competition's Cohort is not in the pull yet`. You can score again on a later As-of date. Each scoring is a new file.
 
@@ -327,6 +336,8 @@ The scored file gives, per Program: `actual_deadline`, `timing_error_months`, `r
 - `git tag --list fy2027-predictions` shows the tag.
 - `git log -1 fy2027-predictions -- data/curated/fy2027_predictions.csv` shows your freeze commit.
 - Each row has `evidence_tier`, `timing` and `flagged_fains`. A Program with `date unknown` shows a deadline row is missing.
+- `flagged_fains` has a value on each row. An empty value shows that the As-of date was too early.
+- `uv run topo score-predictions` gives no "differs from the copy tagged" warning.
 
 ### Do not
 
@@ -343,9 +354,16 @@ The scored file gives, per Program: `actual_deadline`, `timing_error_months`, `r
 
 **Why:** The pipeline never invents a number or a cause. Each fact in these files must trace to a public source, so every row has a citation. A cause note says why a Grant lost money. It needs a source and a docket entry or a page, because a funding pattern alone never proves a cause.
 
-**When:** Before the first real run. After that, each time ED publishes a notice, a budget table or a program page, or a court record names a FAIN.
+**When:** Each time ED publishes a notice, a budget table or a program page, or a court record names a FAIN.
 
-As of 2026-10-17, all four files have a header row only.
+As of 2026-10-17, the files hold:
+
+| File | Rows | Content |
+|---|---|---|
+| `deadlines.csv` | 24 | Every TRIO competition from FY2015 to FY2026 that the current and previous Cohorts need, with FY2017 and FY2022 for Upward Bound, Upward Bound Math and Science, Veterans Upward Bound and McNair. Also 7 GEAR UP rows, which no rule reads. |
+| `appropriations.csv` | 4 | TRIO, FY2021 to FY2024. |
+| `ed_program_allocations.csv` | 35 | The seven TRIO Programs, FY2021 to FY2025. FY2025 has award counts only, because ED did not publish dollars. |
+| `cause_notes.csv` | 11 | The Grants that ED's filings in the COE court cases name by FAIN. |
 
 ### The files
 
@@ -396,14 +414,22 @@ The exact Program names are: `Student Support Services`, `Talent Search`, `Upwar
 
 ### What is still missing
 
-| File | Missing | Where to find it |
+Two deadline items are still open. No other deadline row is missing for the current rules.
+
+| Item | State | What to do |
 |---|---|---|
-| `deadlines.csv` | Rows for the current Cohorts. The research note gives: Student Support Services FY2025 (2024-07-15), Talent Search FY2026 (2026-05-01), Upward Bound FY2022 (2022-01-31), Educational Opportunity Centers FY2026 (2026-05-14), McNair FY2022 (2022-04-25). | `docs/research/trio-gearup-funding-and-cycles.md`, section 2. Check each date in the notice. |
-| `deadlines.csv` | Upward Bound Math and Science FY2022 and Veterans Upward Bound FY2022. The research note gives the notice URL but not the deadline. | The NIA links in the same section 2. |
-| `deadlines.csv` | The Cohort before FY2022 for Upward Bound, Upward Bound Math and Science, Veterans Upward Bound and McNair. The FY2022 backtest needs these rows. | The "Observed gaps between Cohort starts" section of the match-quality report gives the Cohort FY. Then find that year's NIA. |
-| `appropriations.csv` | TRIO and GEAR UP, FY2021 to FY2026. | Research note, section 1a. The note gives thousands of dollars. |
-| `ed_program_allocations.csv` | The seven TRIO Programs, FY2021 to FY2024; FY2025 award counts only. GEAR UP where ED published it. | Research note, sections 1b and 1c. |
-| `cause_notes.csv` | The Grants that court filings name by FAIN. | `docs/research/status-signals-2025-26.md`, section 2. Read each source yourself. |
+| FY2027 deadlines for Upward Bound, Upward Bound Math and Science, Veterans Upward Bound and McNair | ED has published no FY2027 notice yet. | Add each row only after you freeze (task 4) and after the notice is published. Scoring needs these rows. |
+| Talent Search FY2026 | The row uses the Federal Register date, 2026-05-01. Grants.gov shows a later date, 2026-07-09, for ED-GRANT-26-022. No Federal Register extension notice was found. The row's `note` records this. | Search the Federal Register for an extension notice. If you find one, change the date and the citation in the existing row. Do not add a second row. |
+
+The Talent Search date sets the FY2021 Cohort's Predicted due date (`notice published`) and the FY2026 Cohort's date (`inferred`, 60 months later).
+
+The other files have these gaps. None of them stops a check:
+
+| File | Gap | Effect |
+|---|---|---|
+| `appropriations.csv` | TRIO FY2025 and FY2026; GEAR UP for all years. | The TRIO check for FY2025 and later reads `not_published`, because ED published no allocation dollars. No check reads GEAR UP appropriations. You can add the rows from `docs/research/trio-gearup-funding-and-cycles.md`, section 1a. That note gives thousands of dollars. |
+| `ed_program_allocations.csv` | FY2025 dollars; GEAR UP for all years. | ED did not publish FY2025 dollars, so the cells stay blank. GEAR UP rows can come from section 1c of the same note. |
+| `cause_notes.csv` | Grants named only in sealed or paid filings. | Add a row only when a public source names the FAIN. |
 
 GEAR UP needs no deadline rows. GEAR UP rows say "competes most years; timing not predicted".
 
@@ -459,7 +485,7 @@ GEAR UP needs no deadline rows. GEAR UP rows say "competes most years; timing no
 
 **Why:** The spec marks guesses as ASSUMPTION so that the founder can overturn them. Tolerances, windows and thresholds are fixed before the first run. If you change one to close a reconciliation gap or to pass a gate, the result no longer means anything. Thus a change must come from a new decision, made before a run, never from a result.
 
-**When:** The owner confirmed all of these values on 2026-10-17. Change one only when the founder makes a new decision.
+**When:** The owner confirmed all of these values on 2026-10-17. Each ASSUMPTION comment in `config.toml` ends with the line "Confirmed by the owner 2026-10-17." Change a value only when the founder makes a new decision.
 
 | Section | Key | Value | What it controls |
 |---|---|---|---|
@@ -486,7 +512,7 @@ The other tolerances, for example `reconciliation_relative` and `reconciliation_
 
 1. Get the founder's decision in writing.
 2. Edit the value in `config.toml`.
-3. Edit the comment above it. Give the reason and the date.
+3. Edit the comment above it. Keep the word ASSUMPTION. Replace the "Confirmed by the owner" line with the new decision, its reason and its date.
 4. Commit `config.toml`. Write the reason in the commit message.
 5. Run the pipeline: `uv run topo run`.
 
@@ -537,14 +563,13 @@ The manifest, `data/raw/manifest.csv`, has a `missing` row for each gap:
 5. Keep a backup copy. Git ignores raw files.
 6. Get the size: `wc -c < <file>`.
 7. Get the hash: `shasum -a 256 <file>`.
-8. Open `data/raw/manifest.csv` and find the `missing` row for that program and FY.
+   CAUTION: The manifest is append-only. Do not change or delete the `missing` row. When two rows name the same program and FY, the later row wins.
 
-   CAUTION: Replace that row. Do not add a second row for the same program and FY. Two rows stop the clean with a duplicate key in the ED grantee-list coverage.
-
-9. In that row, set `status` to `ok`.
+8. Add a new row at the end of `data/raw/manifest.csv`.
+9. Set `source` to `ed_grantee_lists`, `program` to the manifest program, `fy` to the FY and `status` to `ok`.
 10. Fill `source_page_url`, `file_url`, `pull_date` (the download date), `bytes`, `sha256`, `original_name` and `stored_path`.
 11. Set `request` to `hand-downloaded from source_page_url`.
-12. Keep `licence_citation`. Write in `note` that the list was found later.
+12. Copy `licence_citation` from the `missing` row. Write in `note` that the list was found later.
 13. Do a trial clean: `uv run topo clean ed_grantee_lists --allow-dirty`.
 14. Commit `data/raw/manifest.csv`.
 15. Run the pipeline: `uv run topo run`.
@@ -552,6 +577,7 @@ The manifest, `data/raw/manifest.csv`, has a `missing` row for each gap:
 ### Check
 
 - The clean does not stop. A wrong hash or size stops it with "fails its manifest checksum".
+- The ED-list coverage shows that Program and FY as `ok`, not `missing`.
 - For a PDF, the row count must equal the list's "Total No. of Projects". Otherwise the clean stops.
 - In `output/reconciliation_<Pull date>.csv`, that Program and FY no longer read `no_ed_list`.
 
@@ -559,7 +585,8 @@ The manifest, `data/raw/manifest.csv`, has a `missing` row for each gap:
 
 - Do not automate a download from ed.gov.
 - Do not search for the missing lists as a task. Add one only if it turns up.
-- Do not delete a `missing` row unless you replace it with the `ok` row for the found file.
+- Do not edit or delete a manifest row. Append a new row.
+- Do not put the new row above the `missing` row. The later row wins.
 
 ---
 

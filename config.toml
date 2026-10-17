@@ -23,6 +23,7 @@ reconciliation_relative = 0.01
 reconciliation_absolute_usd = 1_000_000
 # ASSUMPTION: ED per-program award counts vs USAspending Grants funded, within 1%.
 # ED grantee lists are compared exactly (no tolerance).
+# Confirmed by the owner 2026-10-17.
 reconciliation_count_relative = 0.01
 
 [reconciliation]
@@ -32,6 +33,7 @@ reconciliation_count_relative = 0.01
 # with funding, no USAspending action) is "large" at 5% or more overall, or over
 # 10% in any Program x FY; the one-pager must then say unfunded status partly
 # reflects USAspending reporting gaps. Evidence never changes Funding status.
+# Confirmed by the owner 2026-10-17.
 evidence_large_share_overall = 0.05
 evidence_large_share_program_fy = 0.10
 
@@ -74,6 +76,7 @@ disruption_window_end = 2026-09-30
 # ASSUMPTION: Budget periods in a full project period, by Program family. A Grant
 # is expected to run this many periods (or more, when it was funded for more).
 # Erring short avoids calling a planned final year "unfunded".
+# Confirmed by the owner 2026-10-17.
 TRIO = 5
 "GEAR UP" = 6
 
@@ -82,6 +85,7 @@ TRIO = 5
 # automatically is auto-accepted at >= auto_accept_accuracy with at least
 # auto_accept_min_checks checks, demoted to review below the bar, and reported
 # "unverified" (its rule outcome kept) under the minimum. ASSUMPTION: 95% / 10.
+# Confirmed by the owner 2026-10-17.
 auto_accept_accuracy = 0.95
 auto_accept_min_checks = 10
 # Once the answer key in data/curated/host_answer_key.csv is labelled, pin its
@@ -116,6 +120,7 @@ trio_from_fy = 2010
 gear_up_from_fy = 2015
 # An FY is a Cohort start for a Program when its new awards (A1s) number at least
 # this share of the Program's largest yearly count. ASSUMPTION.
+# Confirmed by the owner 2026-10-17.
 cohort_min_share = 0.5
 
 [ccd]
@@ -165,6 +170,7 @@ cycle_months = 60
 # Re-competing soon: the Predicted due date is at most this many months after the
 # As-of date (and the latest readable Funding status is continued or funded late).
 # ASSUMPTION. GEAR UP's "expires within" end-date fact uses the same lead.
+# Confirmed by the owner 2026-10-17.
 lead_months = 12
 deadline_table = "deadlines.csv"
 
@@ -181,6 +187,7 @@ baseline_source = "docs/research/status-signals-2025-26.md"
 # [renewal_timing] lead_months before that Program's actual deadline (from the
 # deadline table), and its Re-competing soon flag must reach `pass_bar` recall
 # and precision. ASSUMPTION: 95%, the same bar as Case-label gating.
+# Confirmed by the owner 2026-10-17.
 competition_fy = 2022
 pass_bar = 0.95
 # `topo freeze` pre-registers the predictions for this competition in
@@ -192,6 +199,7 @@ frozen_predictions = "fy2027_predictions.csv"
 [spot_check]
 # Founder spot-check copy (output/spot_check_<Pull date>.xlsx) and Review findings
 # (data/curated/review_findings.csv). ASSUMPTION: the founder checks 2–3 states.
+# Confirmed by the owner 2026-10-17.
 min_states = 2
 max_states = 3
 note_max_chars = 100
@@ -207,6 +215,7 @@ general_url = "https://app.fac.gov/dissemination/public-data/gsa/full/general.cs
 # fiscal years ending `audit_lag_years` before the last ended FY (the latest audit
 # year is still being filed). Ratios outside [low, high] are flagged `review`;
 # nothing passes or fails. ASSUMPTION: 5 years, 0.5 / 1.5, one-year lag.
+# Confirmed by the owner 2026-10-17.
 plausibility_years = 5
 audit_lag_years = 1
 plausibility_ratio_low = 0.5
