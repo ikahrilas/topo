@@ -114,12 +114,21 @@ def pulled_paths(layout: Layout, source: str, pull_date: dt.date, names: Iterabl
 
 
 def download(url: str, dest: Path, *, timeout: int = 600, urlopen=urllib.request.urlopen) -> None:
-    """GET a URL into a file, streamed through `<dest>.part`, so a broken transfer leaves no `dest`."""
+    """GET a URL into a file, streamed through `<dest>.part`, so a broken transfer leaves no `dest`.
+
+    A transfer that ends short of its Content-Length (servers do close early without an
+    error) raises IncompleteRead, which `retrying` treats as transient.
+    """
     part = dest.with_name(dest.name + ".part")
     try:
         with urlopen(url, timeout=timeout) as response, part.open("wb") as out:
+            received = 0
             while chunk := response.read(1 << 20):
                 out.write(chunk)
+                received += len(chunk)
+            expected = response.headers.get("Content-Length")
+            if expected is not None and received != int(expected):
+                raise http.client.IncompleteRead(b"", int(expected) - received)
     except BaseException:
         part.unlink(missing_ok=True)
         raise

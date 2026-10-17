@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import http.client
 import datetime as dt
 import io
 import subprocess
@@ -134,6 +135,33 @@ def test_download_writes_through_a_part_file_so_a_broken_transfer_leaves_no_arch
     with pytest.raises(ConnectionResetError):
         raw_tree.download("https://files.example/x.zip", dest, urlopen=broken_urlopen)
     assert not dest.exists()
+
+
+def test_a_download_cut_short_of_its_content_length_is_refused_not_kept(tmp_path):
+    # Real pull, 2026-10-17: files.usaspending.gov closed five archive transfers early with no error,
+    # leaving truncated zips (e.g. FY2010 ED, 175 MB) that clean then failed to open.
+    from topo.sources import raw as raw_tree
+
+    def short_urlopen(url, timeout):
+        class Response:
+            headers = {"Content-Length": "10"}
+            body = [b"PK\x03\x04", b""]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                return self.body.pop(0)
+
+        return Response()
+
+    dest = tmp_path / "FY2010_091_Assistance_Full_20261006.zip"
+    with pytest.raises(http.client.IncompleteRead):
+        raw_tree.download("https://files.example/x.zip", dest, urlopen=short_urlopen)
+    assert not dest.exists() and not (tmp_path / (dest.name + ".part")).exists()
 
 
 def test_pull_gives_up_on_a_client_error(project):
