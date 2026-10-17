@@ -36,6 +36,8 @@ def fake_usaspending_http(monkeypatch, project):
     project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
 
     def post_json(url, body):
+        if body["agency"] != 80:  # only ED's archive has a file here; DOL's (18) lists none
+            return {"monthly_files": []}
         name = f"FY{body['fiscal_year']}_091_Assistance_Full_20261006.zip"
         return {"monthly_files": [{"file_name": name, "url": "https://files.example/" + name}]}
 

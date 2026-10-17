@@ -35,7 +35,8 @@ def test_pull_fetches_full_archives_per_fiscal_year_into_the_pull_date_folder(pr
 
     def post_json(url, body):
         requests.append(body)
-        name = f"FY{body['fiscal_year']}_091_Assistance_"
+        code = {80: "091", 18: "1601"}[body["agency"]]
+        name = f"FY{body['fiscal_year']}_{code}_Assistance_"
         return {"monthly_files": [
             {"file_name": name + "Full_20261006.zip", "url": "https://files.example/" + name + "Full_20261006.zip"},
             {"file_name": name + "Delta_20261006.zip", "url": "https://files.example/" + name + "Delta_20261006.zip"},
@@ -47,10 +48,13 @@ def test_pull_fetches_full_archives_per_fiscal_year_into_the_pull_date_folder(pr
 
     pulled = usaspending.pull(load_config(project.config), dt.date(2026, 10, 7), post_json=post_json, download=download)
 
-    # Pull date 2026-10-07 is in FY2027, so FY2026 and FY2027 are fetched; delta files are not.
-    assert [r["fiscal_year"] for r in requests] == [2026, 2027]
-    assert all(r["agency"] == 80 for r in requests)
-    assert [p.path.name for p in pulled] == ["FY2026_091_Assistance_Full_20261006.zip", "FY2027_091_Assistance_Full_20261006.zip"]
+    # Pull date 2026-10-07 is in FY2027, so FY2026 and FY2027 are fetched for ED (80) and DOL (18),
+    # the agency DOL ETA runs some TRIO competitions under; delta files are not.
+    assert [(r["agency"], r["fiscal_year"]) for r in requests] == [(80, 2026), (80, 2027), (18, 2026), (18, 2027)]
+    assert [p.path.name for p in pulled] == [
+        "FY2026_091_Assistance_Full_20261006.zip", "FY2027_091_Assistance_Full_20261006.zip",
+        "FY2026_1601_Assistance_Full_20261006.zip", "FY2027_1601_Assistance_Full_20261006.zip",
+    ]
     assert all(p.path.parent == project.raw_usaspending / "2026-10-07" for p in pulled)
     assert pulled[0].bytes == len(payload) and len(pulled[0].sha256) == 64
     assert pulled[0].pull_date == dt.date(2026, 10, 7) and "USAspending.gov" in pulled[0].licence_citation
