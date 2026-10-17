@@ -6,7 +6,9 @@ only the files named by `ok` rows of the committed, checksummed raw manifest
 (data/raw/manifest.csv, rows with source "ed_grantee_lists") and stops the run when a filed file
 is absent or its bytes or SHA-256 differ from the manifest. Files in the
 folder that the manifest doesn't name are ignored. `missing` rows are the known
-list gaps (#16): they are recorded in the coverage table, never chased.
+list gaps (#16): they are recorded in the coverage table, never chased. The
+manifest is append-only: when several rows cover one (manifest program, FY), the
+later row wins, so a list found later is appended below its `missing` row.
 
 Cleaned tables:
     ed_trio_list_rows     one row per (TRIO Program, FY, FAIN): the "Recipient/ campus"
@@ -45,6 +47,7 @@ CLEANED_TABLES = (TRIO_TABLE, GEARUP_TABLE, COVERAGE_TABLE)
 FILED = "ok"
 MISSING = "missing"
 DROP_FY_OUTSIDE_FILED_RANGE = "fy_outside_filed_range"  # a GEAR UP page table for an FY the manifest row doesn't cover
+DROP_SUPERSEDED = "superseded_by_later_manifest_row"  # a GEAR UP page table for an FY a later manifest row covers
 
 # Manifest program key -> FAIN prefix of the Program it lists.
 MANIFEST_PROGRAMS: dict[str, str] = {
@@ -408,6 +411,18 @@ def _gearup_rows(layout: Layout, row: ManifestRow) -> tuple[list[dict], int, int
 # --------------------------------------------------------------------- clean
 
 
+def _in_force(manifest: list[ManifestRow]) -> list[tuple[ManifestRow, set[int]]]:
+    """Each manifest row with the FYs it is in force for. The manifest is append-only, so when
+    several rows cover one (manifest program, FY), the later row wins: a list found after its
+    gap was recorded is appended as an `ok` row below the `missing` one. A row in force for no
+    FY is not read."""
+    latest = {(row.program, fy): i for i, row in enumerate(manifest) for fy in row.fiscal_years}
+    in_force = [
+        (row, {fy for fy in row.fiscal_years if latest[(row.program, fy)] == i}) for i, row in enumerate(manifest)
+    ]
+    return [(row, fys) for row, fys in in_force if fys]
+
+
 def _frame(model: type[pa.DataFrameModel], records: list[dict]) -> pl.DataFrame:
     schema = model.to_schema()
     dtypes = {name: col.dtype.type for name, col in schema.columns.items()}
@@ -428,15 +443,19 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     gearup: list[dict] = []
     coverage: list[dict] = []
     gearup_on_pages = gearup_outside_range = 0
-    for row in manifest:
+    superseded = 0
+    manifest = _in_force(manifest)
+    for row, fys in manifest:
         program = program_of(row.program)
-        status = {fy: (row.status, row.note) for fy in row.fiscal_years}
+        status = {fy: (row.status, row.note) for fy in fys}
         if row.status == FILED and program.family == TRIO:
             trio.extend(_trio_rows(layout, row))
         elif row.status == FILED:
             new_awards, on_page, outside = _gearup_rows(layout, row)
             gearup_on_pages += on_page
             gearup_outside_range += outside
+            superseded += sum(r["fiscal_year"] not in fys for r in new_awards)
+            new_awards = [r for r in new_awards if r["fiscal_year"] in fys]
             gearup.extend(new_awards)
             tabled = {r["fiscal_year"] for r in new_awards}
             for fy in status:
@@ -468,18 +487,18 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
 
     # Recorded once every filed list has passed its checksum.
     input_hash = provenance.record_raw_inputs(
-        config, SOURCE, [layout.raw_source(SOURCE) / row.stored_name for row in manifest if row.status == FILED]
+        config, SOURCE, [layout.raw_source(SOURCE) / row.stored_name for row, _ in manifest if row.status == FILED]
     )
     if manifest:
         # TRIO rows in = rows the lists state (each list's parse already matches its stated total).
-        pull_date = max(row.pull_date for row in manifest)
+        pull_date = max(row.pull_date for row, _ in manifest)
         run_log.record(
             config, layer="clean", source=TRIO_TABLE, rows_in=len(trio), rows_out=trio_rows.height,
             drops={}, pull_date=pull_date, input_hash=input_hash,
         )
         run_log.record(
             config, layer="clean", source=GEARUP_TABLE, rows_in=gearup_on_pages, rows_out=gearup_rows.height,
-            drops={DROP_FY_OUTSIDE_FILED_RANGE: gearup_outside_range}, pull_date=pull_date, input_hash=input_hash,
+            drops={DROP_FY_OUTSIDE_FILED_RANGE: gearup_outside_range, DROP_SUPERSEDED: superseded}, pull_date=pull_date, input_hash=input_hash,
         )
 
     layout.cleaned.mkdir(parents=True, exist_ok=True)

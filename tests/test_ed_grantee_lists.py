@@ -158,6 +158,20 @@ def test_known_list_gaps_are_recorded_not_chased(project, no_network):
     ]
 
 
+def test_a_list_found_later_is_appended_after_its_gap_row_and_the_later_row_wins(project, no_network):
+    lists = raw_dir(project)
+    write_manifest(lists, [
+        known_gap("ub_84047A", "2024", "known gap: no FY2024 list on the Upward Bound page"),
+        file_list(lists, "ub_84047A", "2024", "ub.pdf", ub_pdf()),  # appended when the list turned up
+    ])
+
+    project.topo("clean", "ed_grantee_lists")
+
+    coverage = cleaned(project, "ed_list_coverage").filter(pl.col("program") == "Upward Bound")
+    assert coverage.select("fiscal_year", "status").rows() == [(2024, "ok")]
+    assert cleaned(project, "ed_trio_list_rows")["fain"].sort().to_list() == ["P047A220187", "P047A221553"]
+
+
 def test_the_committed_manifest_records_the_11_known_gaps():
     from conftest import REPO_ROOT
     from topo.sources.ed_grantee_lists import read_ed_list_manifest_rows
