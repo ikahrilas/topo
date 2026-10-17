@@ -88,6 +88,25 @@ def test_grants_are_selected_by_listing_and_fain_prefix_never_by_agency(project)
     assert exceptions["reason"].unique().to_list() == ["fain_prefix_names_no_program"]
 
 
+def test_an_ed_grant_dol_awards_under_a_dol_style_fain_is_kept_when_its_listing_names_one_program(project):
+    write_actions(project.raw_usaspending, PULL, [
+        # FY2026 Talent Search / EOC awards that DOL ETA issued for ED, under DOL FAINs and DOL's archive.
+        *grant("26E55TS000101", 2026, 1, listing="84.044", agency="1601"),
+        *grant("26E55EO000102", 2026, 1, listing="84.066", agency="1601"),
+        # 84.047 holds UB, UBMS and VUB: a DOL FAIN can't say which, so it stays a visible exception.
+        *grant("26E55UB000103", 2026, 1, listing="84.047", agency="1601"),
+    ])
+
+    project.topo("run", "--as-of", PULL)
+
+    programs = {r["FAIN"]: r["Program"] for r in project.read_csv(f"target_list_{PULL}.csv")}
+    assert programs == {"26E55TS000101": "Talent Search", "26E55EO000102": "Educational Opportunity Centers"}
+    exceptions = pl.read_parquet(project.root / "data/joined/grant_universe_exceptions.parquet")
+    assert exceptions["fain"].unique().to_list() == ["26E55UB000103"]
+    # The FY2026 Talent Search and EOC Cohorts have now appeared, so no "not yet reported" note.
+    assert not any("not yet reported" in r["Data note"] for r in project.read_csv(f"target_list_{PULL}.csv"))
+
+
 def test_a_grant_overlapping_the_window_is_kept_even_if_awarded_before_it(project):
     write_actions(project.raw_usaspending, PULL, [
         *grant("P042A200010", 2020, 6),  # awarded FY2020, runs into the window

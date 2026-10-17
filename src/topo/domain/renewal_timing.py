@@ -221,12 +221,12 @@ def new_award_fys(actions: pl.DataFrame, as_of: dt.date) -> dict[str, set[int]]:
         actions.filter(pl.col("action_type") == "A1")
         .sort("action_date")
         .group_by("fain", maintain_order=True)
-        .agg(pl.col("listing").first(), pl.col("action_date").first())
+        .agg(pl.col("listing").first(), pl.col("action_date").first(), pl.col("awarding_agency_code").first())
         .filter(pl.col("action_date") <= as_of)
     )
     fys: dict[str, set[int]] = {}
-    for fain, listing, date in first.iter_rows():
-        program = program_for(listing, fain)
+    for fain, listing, date, agency in first.iter_rows():
+        program = program_for(listing, fain, agency)
         if program is not None:
             fys.setdefault(program.name, set()).add(fiscal_year(date))
     return fys

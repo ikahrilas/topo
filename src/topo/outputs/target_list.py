@@ -35,8 +35,8 @@ from topo.domain.grant_universe import GrantUniverse
 from topo.domain.local_context import CAMPUS_DISTRICT, HOST_DISTRICT, LocalContext
 from topo.domain.host_linking import HOST_CONFIDENCE, MATCHED, NO_SINGLE_HOST, REVIEW, UNMATCHED
 from topo.domain.priority_tier import RowFacts, label_row
-from topo.domain.programs import PROGRAMS
-from topo.fiscal import ReportingWindow, fy_end, fy_label
+from topo.domain.programs import PROGRAMS, is_dol_style
+from topo.fiscal import ReportingWindow, fiscal_year, fy_end, fy_label
 from topo.guards import StructuralBreak
 from topo.outputs.delivery import delivery_paths, write_new
 
@@ -155,12 +155,23 @@ def provisional_note(fy: int, pull_date: dt.date) -> str:
 
 
 def awaited_cohort_notes(universe: GrantUniverse, settings: TargetListSettings) -> dict[tuple[str, int], str]:
-    """(Program, FY) -> note, for awaited Cohorts none of whose FAINs has appeared yet."""
-    fains = universe.grants["fain"].to_list()
+    """(Program, FY) -> note, for awaited Cohorts none of whose FAINs has appeared yet.
+
+    A Cohort has appeared once a `<FAIN prefix><yy>` FAIN is a Grant, or a DOL-style
+    FAIN Grant of the Program starts in the Cohort's FY or later (DOL FAINs carry no ED prefix).
+    """
+    grants = universe.grants
+    fains = grants["fain"].to_list()
+    dol_starts = [
+        (program, fiscal_year(start))
+        for fain, agency, program, start in grants.select("fain", "awarding_agency_code", "program", "project_start").iter_rows()
+        if is_dol_style(fain, agency)
+    ]
     return {
         (c.program, c.fy): c.note
         for c in settings.awaited_cohorts
         if not any(f.startswith(c.fain_prefix()) for f in fains)
+        and not any(program == c.program and fy >= c.fy for program, fy in dol_starts)
     }
 
 

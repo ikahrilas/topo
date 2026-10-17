@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import pandera.polars as pa
 import polars as pl
 
-from topo.domain.programs import PROGRAMS
+from topo.domain.programs import DOL_AGENCY_CODE, ED_FAIN_PATTERN, PROGRAMS, SOLE_PROGRAM_OF_LISTING
 from topo.fiscal import ReportingWindow, fy_start
 from topo.guards import check_schema, check_unique
 
@@ -101,10 +101,35 @@ _PROGRAM_TABLE = pl.DataFrame(
 )
 
 
+_SOLE_PROGRAM_TABLE = pl.DataFrame(
+    {
+        "listing": list(SOLE_PROGRAM_OF_LISTING),
+        "sole_program": [p.name for p in SOLE_PROGRAM_OF_LISTING.values()],
+        "sole_program_family": [p.family for p in SOLE_PROGRAM_OF_LISTING.values()],
+    }
+)
+
+
 def _label(actions: pl.DataFrame) -> pl.DataFrame:
-    """Every action with its Program (null when listing and FAIN prefix name none)."""
-    return actions.with_columns(pl.col("fain").str.slice(0, 5).alias("fain_prefix")).join(
-        _PROGRAM_TABLE, on=["listing", "fain_prefix"], how="left"
+    """Every action with its Program (null when listing and FAIN name none).
+
+    ED FAINs: listing plus FAIN prefix. DOL-style FAINs (DOL awarding, no ED FAIN
+    format): the listing's Program when the listing names only one (programs.py).
+    """
+    dol_style = (pl.col("awarding_agency_code") == DOL_AGENCY_CODE) & ~pl.col("fain").str.to_uppercase().str.contains(
+        ED_FAIN_PATTERN
+    )
+    return (
+        actions.with_columns(pl.col("fain").str.slice(0, 5).str.to_uppercase().alias("fain_prefix"))
+        .join(_PROGRAM_TABLE, on=["listing", "fain_prefix"], how="left")
+        .join(_SOLE_PROGRAM_TABLE, on="listing", how="left")
+        .with_columns(
+            pl.when(pl.col("program").is_null() & dol_style.fill_null(False))
+            .then(pl.col("sole_program")).otherwise(pl.col("program")).alias("program"),
+            pl.when(pl.col("program").is_null() & dol_style.fill_null(False))
+            .then(pl.col("sole_program_family")).otherwise(pl.col("program_family")).alias("program_family"),
+        )
+        .drop("sole_program", "sole_program_family")
     )
 
 
