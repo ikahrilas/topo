@@ -45,8 +45,9 @@ pull_from_fy = 2010  # the TRIO lookback horizon ([lookback] trio_from_fy)
 # says which archive files are downloaded. `bulk_agency_id` is USAspending's
 # id for list_monthly_files (POST /api/v2/bulk_download/list_agencies/
 # {"type": "award_agencies"}: ED = 80, DOL = 18; checked 2026-10-17). DOL's
-# archive holds the ED programs DOL ETA administers (84.048, 84.002 so far),
-# and DOL ran the FY2026 Talent Search and EOC competitions for ED.
+# archive holds the ED programs DOL ETA administers: 84.002 and 84.048 from FY2025,
+# and the FY2026 Talent Search and EOC new awards (326 on 84.044, FAINs 26D60TS...;
+# 102 on 84.066, 26D60SO...; checked in the 2026-10-17 pull).
 archive_agencies = [
     { toptier_code = "091", bulk_agency_id = 80 },
     { toptier_code = "1601", bulk_agency_id = 18 },
