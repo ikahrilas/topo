@@ -58,6 +58,7 @@ def test_saipe_clean_gives_the_ages_5_17_poverty_rate_by_leaid_with_its_data_yea
         saipe_row("DC", "11", "00030", "District of Columbia Public Schools", 90393, 22266),
         saipe_row("AZ", "4", "8340", "Tempe Union High School District", 20000, 2000),
         saipe_row("AZ", "04", "99999", "Empty district", 0, 0),
+        saipe_row("CA", "06", "20130", "La Cañada Unified School District", 3658, 152),
     ])
 
     project.topo("clean", "saipe")
@@ -65,11 +66,12 @@ def test_saipe_clean_gives_the_ages_5_17_poverty_rate_by_leaid_with_its_data_yea
     rows = pl.read_parquet(project.root / "data" / "cleaned" / "saipe_school_districts.parquet")
     assert rows.select("leaid", "district_name", "children_5_17", "children_5_17_in_poverty", "data_year").rows() == [
         ("0408340", "Tempe Union High School District", 20000, 2000, 2024),
+        ("0620130", "La Cañada Unified School District", 3658, 152, 2024),
         ("1100030", "District of Columbia Public Schools", 90393, 22266, 2024),
     ]
-    assert rows["poverty_rate_5_17"].round(4).to_list() == [0.1, 0.2463]
+    assert rows["poverty_rate_5_17"].round(4).to_list() == [0.1, 0.0416, 0.2463]
     clean = logged(project)[("clean", "saipe_school_districts")]
-    assert (clean["rows_in"], clean["rows_out"]) == (3, 2)
+    assert (clean["rows_in"], clean["rows_out"]) == (4, 3)
     assert drops(clean) == {"no_children_5_17": 1}
 
 
@@ -84,7 +86,7 @@ def test_saipe_file_without_the_expected_header_is_a_structural_break(project):
     path.write_text("a,b,c\n1,2,3\n")
 
     result = project.topo("clean", "saipe", expect_exit=2)
-    assert "District ID" in result.output
+    assert "distid" in result.output
 
 
 def test_edge_pull_fetches_the_geocodes_and_the_district_polygons(project):

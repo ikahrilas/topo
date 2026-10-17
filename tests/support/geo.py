@@ -24,11 +24,9 @@ GEOCODE_COLUMNS = ["UNITID", "NAME", "STREET", "CITY", "STATE", "ZIP", "LAT", "L
 # MTFCC codes for school district polygons.
 ELEMENTARY, SECONDARY, UNIFIED = "G5400", "G5410", "G5420"
 
-SAIPE_HEADER = [
-    "State Postal Code", "State FIPS Code", "District ID", "Name", "Estimated Total Population",
-    "Estimated Population 5-17",
-    "Estimated number of relevant children 5 to 17 years old in poverty who are related to the householder",
-]
+# The real ussd24.csv header (Census codes, no title line): total population, state FIPS,
+# district id, name, state postal code, relevant children 5-17 in poverty, children 5-17.
+SAIPE_HEADER = ["rpopall_24", "state", "distid", "name", "STABREV", "saepov5_17rv_24", "rpop5_17v_24"]
 
 
 def geocode_row(unitid: str, name: str, state: str, lat: float | str, lon: float | str) -> dict[str, str]:
@@ -92,15 +90,14 @@ def write_districts(path: Path, rows: list[dict[str, str]]) -> Path:
 
 
 def saipe_row(state: str, fips: str, district_id: str, name: str, children: int, poor: int) -> list[str]:
-    return [state, fips, district_id, name, str(children * 6), str(children), str(poor)]
+    return [str(children * 6), fips, district_id, name, state, str(poor), str(children)]
 
 
 def write_saipe(path: Path, rows: list[list[str]]) -> Path:
-    """The Census flat file: a title line, then the header row, then one row per district."""
+    """The Census flat file as published: the header row, then one row per district, Windows-1252."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as f:
+    with path.open("w", newline="", encoding="cp1252") as f:
         writer = csv.writer(f)
-        writer.writerow(["Small Area Income and Poverty Estimates: 2024 school districts"])
         writer.writerow(SAIPE_HEADER)
         writer.writerows(rows)
     return path

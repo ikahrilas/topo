@@ -1,10 +1,11 @@
 """Census SAIPE school-district estimates from the Census flat file (never Urban's API).
 
 Raw layout: data/raw/saipe/<Pull date>/<file name from the configured URL>
-(e.g. ussd24.csv). The file may open with title lines; the header row is the
-first row holding a "District ID" cell. Columns are found by header text:
-State FIPS Code, District ID, Name, Estimated Population 5-17 and the
-estimated number of relevant children 5 to 17 in poverty.
+(e.g. ussd24.csv). The header row is the first row holding a `distid` cell;
+the CSV names its columns with Census codes (verified on ussd24.csv, 2026-10-17):
+`state` (state FIPS), `distid`, `name`, `rpop5_17v_<yy>` (estimated population
+5-17) and `saepov5_17rv_<yy>` (estimated relevant children 5-17 in poverty).
+The file is Windows-1252 (e.g. "La Cañada"), not UTF-8.
 
 Cleaned table:
     saipe_school_districts  one row per LEAID (state FIPS + 5-digit district id,
@@ -19,6 +20,7 @@ Without any SAIPE pull, `clean` is a no-op.
 from __future__ import annotations
 
 import csv
+import re
 import datetime as dt
 import io
 
@@ -41,12 +43,13 @@ LICENCE_CITATION = (
     "This product uses the Census Bureau Data API but is not endorsed or certified by the Census Bureau."
 )
 
-# Header text (lowercased, substring) -> cleaned column.
-HEADER_MATCH = {
-    "state fips": "state_fips",
-    "district id": "district_id",
-    "population 5-17": "children_5_17",
-    "in poverty": "children_5_17_in_poverty",
+# Census column code (lowercased; the year suffix `_<yy>` stripped) -> cleaned column.
+HEADER_CODES = {
+    "state": "state_fips",
+    "distid": "district_id",
+    "name": "district_name",
+    "rpop5_17v": "children_5_17",
+    "saepov5_17rv": "children_5_17_in_poverty",
 }
 
 
@@ -76,20 +79,15 @@ def pull(config: Config, pull_date: dt.date, *, download: raw_tree.Download = ra
 def _raw_rows(text: str, raw_file: str) -> pl.DataFrame:
     """The data rows under the header row, with the columns the pipeline reads, all strings."""
     rows = list(csv.reader(io.StringIO(text)))
-    start = next(
-        (i for i, row in enumerate(rows) if any(c.strip().lower() == "district id" for c in row)), None
-    )
+    start = next((i for i, row in enumerate(rows) if any(c.strip().lower() == "distid" for c in row)), None)
     if start is None:
-        raise StructuralBreak(f"{raw_file} has no header row with a 'District ID' column")
-    header = [c.strip().lower() for c in rows[start]]
+        raise StructuralBreak(f"{raw_file} has no header row with a 'distid' column")
     index: dict[str, int] = {}
-    for i, name in enumerate(header):
-        if name == "name":
-            index["district_name"] = i
-        for text_, column in HEADER_MATCH.items():
-            if text_ in name and column not in index:
-                index[column] = i
-    missing = sorted({"district_name", *HEADER_MATCH.values()} - set(index))
+    for i, cell in enumerate(rows[start]):
+        code = re.sub(r"_\d{2}$", "", cell.strip().lower())
+        if code in HEADER_CODES and HEADER_CODES[code] not in index:
+            index[HEADER_CODES[code]] = i
+    missing = sorted(set(HEADER_CODES.values()) - set(index))
     if missing:
         raise StructuralBreak(f"{raw_file} lacks columns: {', '.join(missing)}")
     body = [row for row in rows[start + 1:] if any(c.strip() for c in row)]
@@ -97,6 +95,14 @@ def _raw_rows(text: str, raw_file: str) -> pl.DataFrame:
         {col: [row[i].strip() if i < len(row) else "" for row in body] for col, i in index.items()},
         schema={col: pl.String for col in index},
     )
+
+
+def _decode(data: bytes) -> str:
+    """UTF-8 when the file is UTF-8; else Windows-1252, the encoding Census ships ussd24.csv in."""
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252")
 
 
 def clean_school_districts(raw: pl.DataFrame, *, data_year: int, raw_file: str, pull_date: dt.date) -> pl.DataFrame:
@@ -131,7 +137,7 @@ def clean(config: Config, pull_date: dt.date | None = None) -> pl.DataFrame:
     settings = config.section(SOURCE)
     name = raw_tree.file_name(settings["school_districts_url"])
     [path] = raw_tree.pulled_paths(layout, SOURCE, pull_date, [name], "SAIPE")
-    raw = _raw_rows(path.read_text(encoding="utf-8-sig", errors="replace"), name)
+    raw = _raw_rows(_decode(path.read_bytes()), name)
     input_hash = provenance.record_raw_inputs(config, SOURCE, [path])
     districts = clean_school_districts(raw, data_year=int(settings["data_year"]), raw_file=name, pull_date=pull_date)
     # Counted on the raw rows in their own pass.
