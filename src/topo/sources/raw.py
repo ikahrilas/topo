@@ -113,11 +113,17 @@ def pulled_paths(layout: Layout, source: str, pull_date: dt.date, names: Iterabl
     return paths
 
 
-def download(url: str, dest: Path, *, timeout: int = 600) -> None:
-    """GET a URL into a file, streamed."""
-    with urllib.request.urlopen(url, timeout=timeout) as response, dest.open("wb") as out:
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
+def download(url: str, dest: Path, *, timeout: int = 600, urlopen=urllib.request.urlopen) -> None:
+    """GET a URL into a file, streamed through `<dest>.part`, so a broken transfer leaves no `dest`."""
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urlopen(url, timeout=timeout) as response, part.open("wb") as out:
+            while chunk := response.read(1 << 20):
+                out.write(chunk)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    part.replace(dest)
 
 
 def slow_download(url: str, dest: Path) -> None:

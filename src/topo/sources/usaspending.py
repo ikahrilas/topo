@@ -159,7 +159,10 @@ def pull(
                 if "_Full_" not in entry["file_name"]:
                     continue
                 dest = folder / entry["file_name"]
-                download(entry["url"], dest)
+                # Archive names carry their build date: a file already here (a rerun of this
+                # Pull date) is that same file. Downloads land via `.part`, so it is whole.
+                if not dest.exists():
+                    download(entry["url"], dest)
                 request = f"POST {listing_url} {json.dumps(payload, sort_keys=True)}"
                 pulled.append(raw_tree.described(SOURCE, request, entry["url"], dest, pull_date, LICENCE_CITATION))
     return pulled

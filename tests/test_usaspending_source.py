@@ -89,6 +89,53 @@ def test_pull_retries_a_transient_server_error_instead_of_abandoning_the_pull(pr
     assert len(pauses) == 2 and all(p > 0 for p in pauses)
 
 
+def test_a_rerun_pull_on_the_same_pull_date_keeps_the_archives_it_already_has(project):
+    # Archive file names carry their build date, so a file already in the Pull date folder is that file.
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
+    folder = project.raw_usaspending / "2026-10-07"
+    folder.mkdir(parents=True)
+    (folder / "FY2027_80_Assistance_Full_20261006.zip").write_bytes(b"already here")
+    (folder / "FY2027_18_Assistance_Full_20261006.zip.part").write_bytes(b"half a file")
+    fetched: list[str] = []
+
+    def post_json(url, body):
+        name = f"FY{body['fiscal_year']}_{body['agency']}_Assistance_Full_20261006.zip"
+        return {"monthly_files": [{"file_name": name, "url": "https://files.example/" + name}]}
+
+    def download(url, dest: Path):
+        fetched.append(url)
+        dest.write_bytes(b"fresh")
+
+    pulled = usaspending.pull(load_config(project.config), dt.date(2026, 10, 7), post_json=post_json, download=download)
+
+    assert fetched == ["https://files.example/FY2027_18_Assistance_Full_20261006.zip"]
+    assert [(p.path.name, p.bytes) for p in pulled] == [
+        ("FY2027_80_Assistance_Full_20261006.zip", 12), ("FY2027_18_Assistance_Full_20261006.zip", 5),
+    ]
+
+
+def test_download_writes_through_a_part_file_so_a_broken_transfer_leaves_no_archive(tmp_path):
+    from topo.sources import raw as raw_tree
+
+    def broken_urlopen(url, timeout):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, n):
+                raise ConnectionResetError("dropped")
+
+        return Response()
+
+    dest = tmp_path / "FY2027_091_Assistance_Full_20261006.zip"
+    with pytest.raises(ConnectionResetError):
+        raw_tree.download("https://files.example/x.zip", dest, urlopen=broken_urlopen)
+    assert not dest.exists()
+
+
 def test_pull_gives_up_on_a_client_error(project):
     project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
 
