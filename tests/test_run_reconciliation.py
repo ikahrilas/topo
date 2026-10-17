@@ -64,7 +64,7 @@ def test_the_fy2022_allocation_overage_is_exceeds_appropriation_unexplained_and_
 def test_empty_or_absent_curated_files_run_and_every_outside_figure_reads_not_published(project):
     write_actions(project.raw_usaspending, PULL, grant("P047A220845", 2022, 4))
     project.topo("run", "--as-of", PULL)  # no data/curated at all
-    write_curated(project.root, [], [])  # header-only, as committed
+    write_curated(project.root, [], [])  # header-only
 
     project.topo("run", "--as-of", PULL)
 
@@ -243,10 +243,13 @@ def test_a_duplicate_reconciliation_key_stops_the_run_and_misses_only_warn(proje
     assert "Warning:" in result.output and "unexplained" in result.output
 
 
-def test_the_committed_curated_files_have_their_schema_headers():
+def test_the_committed_curated_files_have_their_schema_headers_and_cite_every_row():
     curated = REPO_ROOT / "data" / "curated"
-    assert (curated / "appropriations.csv").read_text().splitlines() == [",".join(APPROPRIATION_COLUMNS)]
-    assert (curated / "ed_program_allocations.csv").read_text().splitlines() == [",".join(ALLOCATION_COLUMNS)]
+    files = (("appropriations.csv", APPROPRIATION_COLUMNS), ("ed_program_allocations.csv", ALLOCATION_COLUMNS))
+    for name, columns in files:
+        assert (curated / name).read_text().splitlines()[0] == ",".join(columns)
+        filed = pl.read_csv(curated / name, infer_schema=False)
+        assert filed["citation"].str.strip_chars().fill_null("").str.len_chars().min() > 0
 
 
 def test_talent_search_and_eoc_fy2026_rows_note_that_new_awards_are_not_yet_reported(project):
