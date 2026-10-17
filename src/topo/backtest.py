@@ -16,7 +16,7 @@ from topo.domain.renewal_timing import (
     RenewalSettings,
     read_deadline_table,
 )
-from topo.guards import StructuralBreak
+from topo.guards import StructuralBreak, warn
 from topo.joined import (
     COHORT_STARTS,
     COHORT_TIMING,
@@ -41,6 +41,20 @@ def _prediction_stamp(config: Config, context: RunContext) -> dict[str, object]:
         "as_of": context.as_of.isoformat(), "pull_date": context.pull_date.isoformat(), "rule_version": RULE_VERSION,
         "source_commit": run.commit or "", "config_sha256": config.sha256, "run_id": run.run_id,
     }
+
+
+def frozen_tag(competition_fy: int) -> str:
+    """The git tag the owner puts on the freeze commit, e.g. `fy2027-predictions`."""
+    return f"fy{competition_fy}-predictions"
+
+
+def _warn_if_changed_since_tagged(config: Config, frozen_path: Path, tag: str) -> None:
+    """Scoring trusts the frozen file; warn when it no longer matches the tagged freeze (if tagged)."""
+    tagged = provenance.tagged_bytes(config, tag, frozen_path)
+    if tagged is not None and tagged != frozen_path.read_bytes():
+        name = frozen_path.relative_to(config.path.parent).as_posix() if frozen_path.is_relative_to(
+            config.path.parent) else frozen_path.name
+        warn(f"{name} differs from the copy tagged {tag}; the predictions were edited after the freeze")
 
 
 def freeze(config: Config) -> Path:
@@ -68,6 +82,7 @@ def score_predictions(config: Config) -> Path:
     settings = BacktestSettings.from_config(config)
     frozen_path = config.layout.curated / settings.frozen_predictions
     frozen = read_frozen_predictions(frozen_path)
+    _warn_if_changed_since_tagged(config, frozen_path, frozen_tag(settings.freeze_competition_fy))
     renewal = RenewalSettings.from_config(config)
     scored = score_frozen_predictions(
         frozen,

@@ -10,8 +10,11 @@ the FY2022 deadline: 2021-01-31. Only actions dated on or before it are seen.
 from __future__ import annotations
 
 import csv
+import shutil
+import subprocess
 
 import pytest
+from conftest import REPO_ROOT
 from support.markdown import prose, table
 from support.usaspending import action, write_actions
 
@@ -189,6 +192,47 @@ def test_scoring_the_frozen_predictions_writes_a_new_file_and_leaves_the_frozen_
         "recall": "1.0", "precision": "1.0", "result": "pass",
     }
     project.topo("score-predictions", expect_exit=2)  # a second scoring on the same As-of date never overwrites
+
+
+def git(project, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=topo-test", "-c", "user.email=topo@example.invalid", "-c", "commit.gpgsign=false",
+         *args],
+        cwd=project.root, capture_output=True, text=True, check=True,
+    )
+
+
+def frozen_and_tagged(project):
+    """A run, a freeze, then the freeze committed and tagged as the CLI tells the owner to."""
+    write_deadlines(project, UB_2017, UB_2022)
+    write_actions(project.raw_usaspending, PULL, [*UB_2017_COHORT, *UB_2022_COHORT])
+    project.topo("run", "--as-of", PULL)
+    project.topo("freeze")
+    shutil.copy(REPO_ROOT / ".gitignore", project.root / ".gitignore")
+    git(project, "init", "-q")
+    git(project, "add", "-A")
+    git(project, "commit", "-q", "-m", "freeze")
+    git(project, "tag", "fy2027-predictions")
+
+
+def test_scoring_warns_when_the_frozen_file_differs_from_its_tag(project):
+    frozen_and_tagged(project)
+    frozen = project.root / FROZEN
+    frozen.write_text(frozen.read_text().replace("2027-01-31", "2027-03-31"))  # an edit after the freeze
+    git(project, "commit", "-q", "-am", "edit the frozen predictions")
+
+    result = project.topo("score-predictions")
+
+    assert ("Warning: data/curated/fy2027_predictions.csv differs from the copy tagged fy2027-predictions"
+            in result.output)
+
+
+def test_scoring_an_untouched_tagged_freeze_gives_no_tag_warning(project):
+    frozen_and_tagged(project)
+
+    result = project.topo("score-predictions")
+
+    assert "tagged" not in result.output
 
 
 def test_scoring_without_a_frozen_file_stops(project):
