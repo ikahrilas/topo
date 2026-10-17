@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-labelledby="title desc">
+  <title id="title">topo</title>
+  <desc id="desc">A mountain made of four contour bands, one for each data layer, with a rising sun behind the summit.</desc>
+  <defs>
+    <clipPath id="mountain">
+      <path d="M14 172 L68 100 Q73 93 78 100 L92 118 L116 50 Q120 42 124 50 L186 172 Z"/>
+    </clipPath>
+  </defs>
+  <!-- the sun: Elevated Minds, rising behind the summit -->
+  <circle cx="146" cy="60" r="24" fill="#F2A541"/>
+  <circle cx="146" cy="60" r="33" fill="none" stroke="#F2A541" stroke-width="3" stroke-dasharray="4 7" stroke-linecap="round"/>
+  <!-- four elevation bands: raw, cleaned, joined, output -->
+  <g clip-path="url(#mountain)">
+    <rect x="0" y="0" width="200" height="200" fill="#0B2540"/>
+    <path d="M0 146 Q50 132 100 142 T200 136 V0 H0 Z" fill="#134E6F"/>
+    <path d="M0 118 Q50 104 100 114 T200 106 V0 H0 Z" fill="#1B7F8C"/>
+    <path d="M0 90 Q50 76 100 86 T200 78 V0 H0 Z" fill="#3FB1A6"/>
+    <path d="M0 68 Q50 56 100 64 T200 58 V0 H0 Z" fill="#BDEBE1"/>
+    <!-- contour lines between the bands -->
+    <g fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-opacity="0.85">
+      <path d="M0 146 Q50 132 100 142 T200 136"/>
+      <path d="M0 118 Q50 104 100 114 T200 106"/>
+      <path d="M0 90 Q50 76 100 86 T200 78"/>
+      <path d="M0 68 Q50 56 100 64 T200 58"/>
+    </g>
+  </g>
+  <!-- the summit marker -->
+  <circle cx="120" cy="47" r="4.5" fill="#F2A541" stroke="#0B2540" stroke-width="2"/>
+</svg>
