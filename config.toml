@@ -48,8 +48,9 @@ archive_agencies = [{ toptier_code = "091", bulk_agency_id = 80 }]
 # Urban Education Data Portal bulk CSVs, fetched by `topo pull ipeds`. Never
 # Urban's /api/ (robots.txt disallows it). ODC-By: cite portal and dataset.
 directory_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_directory.csv"
-# UNVERIFIED file name: check it against
-# https://educationdata.urban.org/documentation/data/api-downloads.json before the first pull.
+# Verified 2026-10-17 in https://educationdata.urban.org/documentation/data/api-downloads.json
+# ("Colleges IPEDS Enrollment by Race, 2024", the latest year). Columns: unitid, year, fips,
+# sex, race, ftpt, level_of_study, degree_seeking, class_level, enrollment_fall (99 = total).
 enrollment_url = "https://educationdata.urban.org/csv/ipeds/colleges_ipeds_fall-enrollment-race_2024.csv"
 # Directory years kept: names since 2015 cover former names; UEIs start in 2022.
 directory_from_year = 2015
@@ -121,6 +122,7 @@ cohort_min_share = 0.5
 [ccd]
 # Urban Education Data Portal bulk CSV of the CCD LEA (school district) directory,
 # fetched by `topo pull ccd`. Never Urban's /api/. ODC-By: cite portal and dataset.
+# Verified 2026-10-17: the file (1986-2024) has an `enrollment` column (read for Local context).
 lea_directory_url = "https://educationdata.urban.org/csv/ccd/school-districts_lea_directory.csv"
 # District years kept: names since 2015 cover renamed districts.
 directory_from_year = 2015
@@ -132,7 +134,8 @@ agency_types = [1, 2, 4, 5, 7]
 [saipe]
 # Census SAIPE school-district estimates, fetched by `topo pull saipe` from the
 # Census flat file (one request; never Urban's /api/). Urban's SAIPE CSV stops
-# at 2022. `data_year` is the estimate year of that file (ussd24 = 2024
+# at 2022. Verified 2026-10-17: ussd24.csv is Windows-1252 with Census-coded
+# columns rpopall_24, state, distid, name, STABREV, saepov5_17rv_24, rpop5_17v_24. `data_year` is the estimate year of that file (ussd24 = 2024
 # estimates, 2024-25 district boundaries).
 school_districts_url = "https://www2.census.gov/programs-surveys/saipe/datasets/2024/2024-school-districts/ussd24.csv"
 data_year = 2024
@@ -141,9 +144,12 @@ data_year = 2024
 # NCES EDGE files, fetched by `topo pull edge`: postsecondary campus geocodes
 # (lat/lon by UNITID) and the composite school district polygons (SY 2024-25,
 # GEOID = LEAID except pseudo-districts). Public domain.
-# UNVERIFIED download paths: check them against
+# Download paths verified 2026-10-17: both are the latest files linked from
 # https://nces.ed.gov/programs/edge/Geographic/SchoolLocations and
-# https://nces.ed.gov/programs/edge/Geographic/DistrictBoundaries before the first pull.
+# https://nces.ed.gov/programs/edge/Geographic/DistrictBoundaries. The geocode zip
+# holds an XLSX with UNITID, NAME, STREET, CITY, STATE, ZIP, ..., LAT, LON, ..., SCHOOLYEAR
+# (6,438 rows); the district zip one shapefile (NAD83) with STATEFP, GEOID, NAME,
+# MTFCC (G5400/G5410/G5420/G5430), SCHOOLYEAR "2024-2025", ... (13,368 polygons).
 postsecondary_geocodes_url = "https://nces.ed.gov/programs/edge/data/EDGE_GEOCODE_POSTSECSCH_2526.zip"
 school_districts_url = "https://nces.ed.gov/programs/edge/data/EDGE_SCHOOLDISTRICT_TL25_SY2425.zip"
 
