@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import tempfile
+import time
 import urllib.request
 import zipfile
 from collections import Counter
@@ -137,12 +138,14 @@ def pull(
     *,
     post_json: PostJson = _post_json,
     download: raw_tree.Download = raw_tree.download,
+    pause: raw_tree.Pause = time.sleep,
 ) -> list[PulledFile]:
     """Fetch the monthly Full assistance archive per configured agency and fiscal year.
 
     Fiscal years run from `[usaspending] pull_from_fy` through the FY of the Pull date.
-    Files are fetched serially (polite to the API host).
+    Files are fetched serially (polite to the API host); transient errors are retried.
     """
+    post_json, download = raw_tree.retrying(post_json, pause), raw_tree.retrying(download, pause)
     settings = config.section(SOURCE)
     folder = raw_tree.pull_folder(config.layout, SOURCE, pull_date)
     folder.mkdir(parents=True, exist_ok=True)

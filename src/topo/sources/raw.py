@@ -6,6 +6,7 @@
     pulled_paths(...)                 the configured files of one pull; a missing one stops the run
     file_name(url)                    the file name a URL is stored under
     fetch(...)                        download URLs serially into a pull folder -> PulledFile rows
+    retrying(call, pause)             retry a request on a transient error (HTTP 5xx/429, dropped connection)
     refuse_urban_api(url)             Urban's robots.txt disallows /api/: only /csv/ bulk files
 
 A source's `clean` starts the same way: take the given Pull date, else the latest;
@@ -16,6 +17,9 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import http.client
+import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -26,6 +30,35 @@ from topo.config import Layout
 from topo.guards import StructuralBreak
 
 Download = Callable[[str, Path], None]
+Pause = Callable[[float], None]
+
+RETRY_PAUSES = (30.0, 120.0, 300.0)  # seconds before the 2nd, 3rd and 4th attempt
+
+
+def _transient(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500 or error.code == 429
+    return isinstance(error, (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError))
+
+
+def retrying[**P, R](call: Callable[P, R], pause: Pause = time.sleep) -> Callable[P, R]:
+    """`call`, retried after a pause on a transient error (HTTP 5xx or 429, a dropped connection).
+
+    A client error (other 4xx) or the last attempt's error is raised. Real pulls hit
+    one-off HTTP 500s from USAspending's list_monthly_files.
+    """
+
+    def attempt(*args: P.args, **kwargs: P.kwargs) -> R:
+        for wait in RETRY_PAUSES:
+            try:
+                return call(*args, **kwargs)
+            except Exception as error:  # noqa: BLE001 - narrowed by _transient
+                if not _transient(error):
+                    raise
+                pause(wait)
+        return call(*args, **kwargs)
+
+    return attempt
 
 
 @dataclass(frozen=True)
@@ -113,12 +146,14 @@ def described(source: str, request: str, url: str, path: Path, pull_date: dt.dat
 def fetch(
     layout: Layout, source: str, pull_date: dt.date, urls: Iterable[str], download: Download, licence_citation: str
 ) -> list[PulledFile]:
-    """GET each URL (serially, polite to the host) into data/raw/<source>/<Pull date>/<file name>."""
+    """GET each URL (serially, polite to the host) into data/raw/<source>/<Pull date>/<file name>.
+
+    Transient errors are retried (`retrying`)."""
     folder = pull_folder(layout, source, pull_date)
     folder.mkdir(parents=True, exist_ok=True)
     pulled = []
     for url in urls:
         dest = folder / file_name(url)
-        download(url, dest)
+        retrying(download)(url, dest)
         pulled.append(described(source, f"GET {url}", url, dest, pull_date, licence_citation))
     return pulled

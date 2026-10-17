@@ -7,9 +7,11 @@ import datetime as dt
 import io
 import subprocess
 import sys
+import urllib.error
 import zipfile
 from pathlib import Path
 
+import pytest
 from support.usaspending import ARCHIVE_COLUMNS, action, write_archive
 
 from topo.config import load_config
@@ -58,6 +60,44 @@ def test_pull_fetches_full_archives_per_fiscal_year_into_the_pull_date_folder(pr
     assert all(p.path.parent == project.raw_usaspending / "2026-10-07" for p in pulled)
     assert pulled[0].bytes == len(payload) and len(pulled[0].sha256) == 64
     assert pulled[0].pull_date == dt.date(2026, 10, 7) and "USAspending.gov" in pulled[0].licence_citation
+
+
+def test_pull_retries_a_transient_server_error_instead_of_abandoning_the_pull(project):
+    # Real pull, 2026-10-17: list_monthly_files answered HTTP 500 once, 40 minutes into the pull.
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
+    failures = {"list": 1, "download": 1}
+    pauses: list[float] = []
+
+    def post_json(url, body):
+        if failures["list"]:
+            failures["list"] -= 1
+            raise urllib.error.HTTPError(url, 500, "Internal Server Error", {}, None)
+        name = f"FY{body['fiscal_year']}_{body['agency']}_Assistance_Full_20261006.zip"
+        return {"monthly_files": [{"file_name": name, "url": "https://files.example/" + name}]}
+
+    def download(url, dest: Path):
+        if failures["download"]:
+            failures["download"] -= 1
+            raise urllib.error.URLError("Remote end closed connection without response")
+        dest.write_bytes(b"zip")
+
+    pulled = usaspending.pull(
+        load_config(project.config), dt.date(2026, 10, 7), post_json=post_json, download=download, pause=pauses.append
+    )
+
+    assert [p.path.name for p in pulled] == ["FY2027_80_Assistance_Full_20261006.zip", "FY2027_18_Assistance_Full_20261006.zip"]
+    assert len(pauses) == 2 and all(p > 0 for p in pauses)
+
+
+def test_pull_gives_up_on_a_client_error(project):
+    project.set_config("pull_from_fy = 2010", "pull_from_fy = 2027")
+
+    def post_json(url, body):
+        raise urllib.error.HTTPError(url, 400, "Bad Request", {}, None)
+
+    with pytest.raises(urllib.error.HTTPError):
+        usaspending.pull(load_config(project.config), dt.date(2026, 10, 7), post_json=post_json,
+                         download=lambda url, dest: None, pause=lambda s: None)
 
 
 def test_clean_reads_zipped_archive_files(project):
