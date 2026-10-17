@@ -223,6 +223,21 @@ def test_overrides_win_after_the_rules_and_survive_reruns(project):
     assert overrides["P042A250022"]["Rule case label"] == "system_campus_not_stated"
 
 
+def test_an_override_naming_a_fain_outside_the_run_warns(project):
+    setup(project)
+    write_overrides(project.root, [
+        override_row("P042A250022", "UNITID 174233"),
+        override_row("P042A259999", "UNITID 174066", note="FAIN mistyped"),
+    ])
+
+    result = project.topo("run", "--as-of", PULL)
+
+    warnings = [line for line in result.output.splitlines() if line.startswith("Warning:")]
+    assert [w for w in warnings if "Host override" in w] == [
+        "Warning: 1 Host override names a FAIN not in this run, so it is not applied: P042A259999"
+    ]
+
+
 def test_review_queue_lists_candidates_with_signals_by_dollars_and_succession_impact(project):
     setup(project, [
         *GRANTS,

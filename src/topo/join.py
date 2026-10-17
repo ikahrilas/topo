@@ -254,6 +254,7 @@ def _join_succession(
     lookback = build_lookback(actions, universe.window, settings.from_fy_by_family)
     lookback_host_links = after_rules(build_host_links(lookback.grants, actions, lookups, _ed_trio_rows(config))[0])
     grants = pl.concat([universe.grants, lookback.grants])
+    _warn_overrides_outside_run(config, set(grants["fain"].to_list()))
     grant_actions = pl.concat([universe.grant_actions, lookback.grant_actions])
     cohort_starts, grant_cohorts = derive_cohorts(grants, grant_actions, settings.cohort_min_share)
     successions = build_successions(grants, pl.concat([host_links, lookback_host_links]), grant_cohorts)
@@ -265,6 +266,16 @@ def _join_succession(
     for name, frame in tables.items():
         frame.write_parquet(config.layout.joined_table(name))
     return successor_fains(successions, hand_offs)
+
+
+def _warn_overrides_outside_run(config: Config, fains: set[str]) -> None:
+    """An override is applied by FAIN; one naming a FAIN in neither the window nor the lookback
+    (a typo, say) would otherwise be ignored silently."""
+    outside = sorted(set(curated.read_overrides(config)["fain"].to_list()) - fains)
+    if len(outside) == 1:
+        warn(f"1 Host override names a FAIN not in this run, so it is not applied: {outside[0]}")
+    elif outside:
+        warn(f"{len(outside)} Host overrides name FAINs not in this run, so they are not applied: {', '.join(outside)}")
 
 
 def _join_funding_status(

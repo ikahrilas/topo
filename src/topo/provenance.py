@@ -92,6 +92,16 @@ def current_run(config: Config) -> Run:
 # ---------------------------------------------------------------- raw inputs
 
 
+def tagged_bytes(config: Config, tag: str, path: Path) -> bytes | None:
+    """The bytes of `path` as committed at git tag `tag`; None when there is no such tag or file
+    (or no git checkout)."""
+    root = config.path.parent
+    if _git(root, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}").returncode != 0:
+        return None
+    shown = subprocess.run(["git", "show", f"{tag}:./{_relative(config, path)}"], cwd=root, capture_output=True)
+    return shown.stdout if shown.returncode == 0 else None
+
+
 def _relative(config: Config, path: Path) -> str:
     root = config.path.parent.resolve()
     path = Path(path).resolve()
