@@ -32,7 +32,7 @@ from topo.guards import StructuralBreak
 Download = Callable[[str, Path], None]
 Pause = Callable[[float], None]
 
-RETRY_PAUSES = (30.0, 120.0, 300.0)  # seconds before the 2nd, 3rd and 4th attempt
+RETRY_PAUSES = (30.0, 60.0, 120.0, 300.0, 300.0, 600.0)  # seconds before each further attempt
 
 
 def _transient(error: Exception) -> bool:
@@ -117,21 +117,25 @@ def download(url: str, dest: Path, *, timeout: int = 600, urlopen=urllib.request
     """GET a URL into a file, streamed through `<dest>.part`, so a broken transfer leaves no `dest`.
 
     A transfer that ends short of its Content-Length (servers do close early without an
-    error) raises IncompleteRead, which `retrying` treats as transient.
+    error) raises IncompleteRead, which `retrying` treats as transient. The `.part` file is
+    kept, and the next attempt asks only for the rest (HTTP Range); a server that ignores
+    the range (200, not 206) sends the whole file again, which replaces the part.
     """
     part = dest.with_name(dest.name + ".part")
-    try:
-        with urlopen(url, timeout=timeout) as response, part.open("wb") as out:
+    have = part.stat().st_size if part.exists() else 0
+    request = urllib.request.Request(url)
+    if have:
+        request.add_header("Range", f"bytes={have}-")
+    with urlopen(request, timeout=timeout) as response:
+        resumed = have and getattr(response, "status", 200) == 206
+        with part.open("ab" if resumed else "wb") as out:
             received = 0
             while chunk := response.read(1 << 20):
                 out.write(chunk)
                 received += len(chunk)
-            expected = response.headers.get("Content-Length")
-            if expected is not None and received != int(expected):
-                raise http.client.IncompleteRead(b"", int(expected) - received)
-    except BaseException:
-        part.unlink(missing_ok=True)
-        raise
+        expected = response.headers.get("Content-Length")
+        if expected is not None and received != int(expected):
+            raise http.client.IncompleteRead(b"", int(expected) - received)
     part.replace(dest)
 
 
